@@ -95,7 +95,7 @@ def test_breakeven_trailing(risk_env):
 
     # Trigger BEP check
     modified = rm.check_and_apply_breakeven(current_atr={"XAUUSD": 10.0})
-    assert ticket in modified
+    assert any(m["ticket"] == ticket for m in modified)
 
     # Verify that position's SL was moved to Entry Price (2650.00)
     pos = [p for p in connector._mock_positions if p["ticket"] == ticket][0]

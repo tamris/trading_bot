@@ -1,5 +1,8 @@
-# MetaTrader 5 Bridge
-MetaTrader5>=5.0.45
+# MetaTrader 5 Bridge (Windows only)
+MetaTrader5>=5.0.45; sys_platform == "win32"
+
+# Direct Cloud API & Cryptography (Cross-platform Linux/Docker/Cloud)
+cryptography>=41.0.0
 
 # AI Engine
 google-genai>=3.0.0
@@ -8,6 +11,7 @@ pydantic-settings>=2.0.0
 
 # Environment & Settings
 python-dotenv>=1.0.0
+psutil>=5.9.0
 
 # Data Analysis & Calculations
 pandas>=2.0.0

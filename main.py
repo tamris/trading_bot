@@ -86,7 +86,14 @@ class TradingBotApp:
 
         # Initialize Core Engines
         logger.info(f"Initializing AI Trading Bot (Mock Mode: {self.mock_mode})...")
-        self.mt5 = MT5Connector(mock_mode=self.mock_mode)
+        backend = getattr(settings, "TRADING_BACKEND", "MT5").upper().strip()
+        if backend == "EXNESS_API":
+            logger.info("Using Exness Cloud Trading API Backend (Cross-Platform / Linux / Railway / Cloud)...")
+            from core.exness_api_connector import ExnessApiConnector
+            self.mt5 = ExnessApiConnector()
+        else:
+            logger.info("Using MetaTrader 5 Desktop Backend (Windows)...")
+            self.mt5 = MT5Connector(mock_mode=self.mock_mode)
         self.technical_engine = TechnicalEngine()
         self.risk_manager = RiskManager(self.mt5)
         self.news_scraper = NewsScraper()

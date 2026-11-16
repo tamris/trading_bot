@@ -25,6 +25,13 @@ class Settings(BaseSettings):
     )
     MT5_MOCK_MODE: bool = Field(default=True, description="Enable mock mode for testing without active broker")
 
+    # Exness Direct Cloud API Settings (Linux / Railway / Cloud)
+    TRADING_BACKEND: str = Field(default="MT5", description="Execution backend: 'MT5' (Windows terminal) or 'EXNESS_API' (Direct cloud REST API)")
+    EXNESS_API_KEY: str = Field(default="", description="Exness API Key (exnsk-...)")
+    EXNESS_API_SECRET: str = Field(default="", description="Exness Ed25519 Private Key Hex (128 chars)")
+    EXNESS_ACCOUNT_ID: str = Field(default="", description="Exness Trading Account ID")
+    EXNESS_GATEWAY_URL: str = Field(default="https://api.exness-api.com", description="Exness Gateway discovery URL")
+
     # Gemini AI Settings
     GEMINI_API_KEY: str = Field(default="", description="Primary Google Gemini API Key")
     GEMINI_API_KEYS_RAW: str = Field(default="", alias="GEMINI_API_KEYS", description="Comma-separated pool of Gemini API Keys")

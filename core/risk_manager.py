@@ -16,7 +16,11 @@ class RiskManager:
         "XAUUSDM": 45,
         "EURUSDM": 25,
         "USDJPYM": 25,
-        "BTCUSDM": 3500
+        "BTCUSDM": 3500,
+        "XAUUSD": 45,
+        "EURUSD": 25,
+        "USDJPY": 25,
+        "BTCUSD": 3500
     }
 
     def __init__(self, mt5_connector: MT5Connector):
