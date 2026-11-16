@@ -1,0 +1,27 @@
+# MetaTrader 5 Bridge
+MetaTrader5>=5.0.45
+
+# AI Engine
+google-genai>=3.0.0
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
+
+# Environment & Settings
+python-dotenv>=1.0.0
+
+# Data Analysis & Calculations
+pandas>=2.0.0
+numpy>=1.24.0
+
+# Scheduling & Utilities
+apscheduler>=3.10.0
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+feedparser>=6.0.10
+
+# Telegram Interface
+python-telegram-bot>=21.0
+
+# Testing
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
