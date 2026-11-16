@@ -37,6 +37,10 @@ class ExnessApiConnector:
         self._is_connected = False
         self._symbol_conditions_cache: Dict[str, Dict[str, Any]] = {}
         self._cache_file = os.path.join(os.path.dirname(__file__), "..", "data", "exness_ap_cache.json")
+        self._last_req_time: float = 0.0
+        self._min_interval: float = 0.55  # 550ms ensures max ~1.8 req/sec, strictly below Exness 2 req/sec limit
+        self._cached_snapshot: Optional[Dict[str, Any]] = None
+        self._cached_snapshot_time: float = 0.0
 
     def _load_key(self) -> None:
         """Load Ed25519 private key from 128-hex character string or unencrypted PKCS#8 PEM."""
@@ -117,9 +121,16 @@ class ExnessApiConnector:
         path_with_query: str,
         body: Optional[Dict[str, Any]] = None,
         use_access_point: bool = True,
-        timeout: int = 15
+        timeout: int = 15,
+        retry: bool = False
     ) -> Tuple[bool, Any]:
-        """Send authenticated signed HTTP request to Exness Gateway or Access Point."""
+        """Send authenticated signed HTTP request to Exness Gateway or Access Point with proactive rate-limiting."""
+        # Enforce rate-limit pacing (max 1.8 req/sec)
+        elapsed = time.time() - self._last_req_time
+        if elapsed < self._min_interval:
+            time.sleep(self._min_interval - elapsed)
+        self._last_req_time = time.time()
+
         base = self.access_point if use_access_point and self.access_point else self.gateway_url
         url = base + path_with_query
 
@@ -141,11 +152,28 @@ class ExnessApiConnector:
                 return True, json.loads(resp_bytes.decode("utf-8"))
         except urllib.error.HTTPError as e:
             err_body = e.read().decode("utf-8", errors="ignore")
+            if e.code == 429 and not retry:
+                logger.warning(f"[Exness API] 429 Rate Limit encountered. Cooling down 1.2s and retrying...")
+                time.sleep(1.2)
+                return self._request(method, path_with_query, body, use_access_point, timeout, retry=True)
             logger.error(f"[Exness API] HTTP {e.code} on {method} {path_with_query}: {err_body}")
             return False, {"error": err_body, "status_code": e.code}
         except Exception as e:
             logger.error(f"[Exness API] Connection error on {method} {path_with_query}: {e}")
             return False, {"error": str(e)}
+
+    def _get_snapshot(self, max_age_seconds: float = 3.0) -> Tuple[bool, Any]:
+        """Fetch trading state snapshot with in-memory caching to respect 2 req/sec limit."""
+        now = time.time()
+        if self._cached_snapshot and (now - self._cached_snapshot_time < max_age_seconds):
+            return True, self._cached_snapshot
+
+        path = f"/v1/trading/accounts/{self.account_id}/snapshot"
+        ok, data = self._request("GET", path, use_access_point=True)
+        if ok and "account_state" in data:
+            self._cached_snapshot = data
+            self._cached_snapshot_time = now
+        return ok, data
 
     def _load_cached_access_point(self) -> Optional[str]:
         """Load cached Access Point URL to avoid rate-limiting the discovery endpoint."""
@@ -229,8 +257,7 @@ class ExnessApiConnector:
         if not self._is_connected:
             self.connect()
 
-        path = f"/v1/trading/accounts/{self.account_id}/snapshot"
-        ok, data = self._request("GET", path, use_access_point=True)
+        ok, data = self._get_snapshot()
         if not ok or "account_state" not in data:
             logger.warning(f"[Exness API] Failed to get account snapshot: {data}")
             return {
@@ -321,7 +348,7 @@ class ExnessApiConnector:
             tf = "M15"
 
         now = datetime.now(timezone.utc)
-        days_back = 4 if tf == "M15" else 15
+        days_back = 7 if tf == "M15" else 22
         from_time = (now - timedelta(days=days_back)).strftime("%Y-%m-%dT%H:%M:%SZ")
         to_time = now.strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -440,8 +467,7 @@ class ExnessApiConnector:
         Get active open positions mapped to standard MT5 dictionary format.
         Endpoint: GET /v1/trading/accounts/{account_id}/snapshot
         """
-        path = f"/v1/trading/accounts/{self.account_id}/snapshot"
-        ok, data = self._request("GET", path, use_access_point=True)
+        ok, data = self._get_snapshot()
         if not ok or "positions" not in data:
             return []
 
