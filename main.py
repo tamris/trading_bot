@@ -81,8 +81,10 @@ class TradingBotApp:
         self.trading_state = {
             "is_paused": False,
             "last_check_time": "Never",
-            "last_signals": {}
+            "last_signals": {},
+            "last_scan_reasons": {}
         }
+        self._last_report_hour = -1
 
         # Initialize Core Engines
         logger.info(f"Initializing AI Trading Bot (Mock Mode: {self.mock_mode})...")
@@ -106,6 +108,7 @@ class TradingBotApp:
             db=self.db,
             gemini_analyst=self.gemini_analyst
         )
+        self.telegram.set_radar_provider(self.get_radar_summary)
 
         self.scheduler = AsyncIOScheduler()
         self._is_running = False
@@ -190,6 +193,67 @@ class TradingBotApp:
 
         logger.info(f"========== [PIPELINE CYCLE FINISHED] ==========\n")
 
+        # Step 4: Periodic Scan Report to Telegram (Heartbeat)
+        await self._check_and_send_periodic_report()
+
+    async def _check_and_send_periodic_report(self):
+        """Send periodic scan summary to Telegram based on configured frequency ('1h', '15m', or 'off')."""
+        mode = getattr(self.telegram, "scan_report_mode", "1h").lower().strip()
+        if mode == "off":
+            return
+
+        now_wib = datetime.now(timezone(timedelta(hours=7)))
+        should_send = False
+
+        if mode == "15m":
+            should_send = True
+        elif mode == "1h":
+            # Send at the top of the hour (:00) or once per hour
+            if now_wib.minute == 0 or (now_wib.hour != self._last_report_hour and now_wib.minute < 15):
+                should_send = True
+                self._last_report_hour = now_wib.hour
+
+        if should_send and not self.trading_state.get("is_paused", False):
+            msg = await self.get_radar_summary()
+            await self.telegram.send_alert(msg)
+
+    async def get_radar_summary(self) -> str:
+        """Format live market radar summary for all monitored symbols."""
+        now_str = get_wib_str()
+        acc = self.mt5.get_account_info()
+        balance = acc.get("balance", 0.0)
+        equity = acc.get("equity", balance)
+        open_positions = self.mt5.get_open_positions()
+
+        lines = [f"📡 *[Radar Analisa Pasar - {now_str[:16]} WIB]*\n"]
+        for sym in settings.SYMBOLS:
+            reason = self.trading_state.get("last_scan_reasons", {}).get(sym, "Menunggu evaluasi")
+            # Format clean icon based on reason
+            if "EXECUTED" in reason or ("BUY" in reason and "setup" in reason):
+                icon = "🎯"
+            elif "session" in reason.lower() or "sesi" in reason.lower() or "rollover" in reason.lower():
+                icon = "💤"
+            elif "adx" in reason.lower() or "sideways" in reason.lower():
+                icon = "⏸️"
+            elif "blackout" in reason.lower() or "news" in reason.lower():
+                icon = "📰"
+            elif "cooldown" in reason.lower():
+                icon = "⏳"
+            elif "conflicting" in reason.lower() or "trend" in reason.lower():
+                icon = "🔄"
+            else:
+                icon = "🔍"
+
+            # Shorten if too long
+            clean_reason = reason
+            if len(clean_reason) > 65:
+                clean_reason = clean_reason[:62] + "..."
+            lines.append(f"• *{sym}:* {icon} _{clean_reason}_")
+
+        lines.append(f"\n💰 *Saldo:* `${balance:.2f}` | *Equity:* `${equity:.2f}` | *Posisi:* `{len(open_positions)}`")
+        lines.append("💡 _Gunakan tombol '🔍 Radar Pasar' kapan saja untuk cek instan._")
+        return "\n".join(lines)
+
     async def _process_symbol(self, symbol: str):
         """Process analysis and execution pipeline for a single instrument."""
         logger.info(f"Evaluating {symbol}...")
@@ -197,12 +261,14 @@ class TradingBotApp:
         # 1. Position limits check
         can_open, reason = self.risk_manager.can_open_position(symbol)
         if not can_open:
+            self.trading_state["last_scan_reasons"][symbol] = reason
             logger.info(f"Skipping entry for {symbol}: {reason}")
             return
 
         # 2. News Blackout Filter (+/- 15 mins around High Impact USD/EUR)
         is_blackout, blackout_msg = self.news_scraper.is_news_blackout(symbol)
         if is_blackout:
+            self.trading_state["last_scan_reasons"][symbol] = blackout_msg
             logger.warning(f"Skipping entry for {symbol}: {blackout_msg}")
             return
 
@@ -211,6 +277,7 @@ class TradingBotApp:
         df_h1 = self.mt5.fetch_rates(symbol, settings.TIMEFRAME_MACRO, count=300)
 
         if df_m15.empty or len(df_m15) < settings.EMA_SLOW_PERIOD:
+            self.trading_state["last_scan_reasons"][symbol] = "Data candle belum cukup"
             logger.warning(f"Insufficient candle data for {symbol}. Skipping.")
             return
 
@@ -219,6 +286,7 @@ class TradingBotApp:
         self.trading_state["last_signals"][symbol] = tech_signal
 
         if not tech_signal.is_valid or tech_signal.action == "HOLD":
+            self.trading_state["last_scan_reasons"][symbol] = tech_signal.reason
             logger.info(f"{symbol} Hard Rules: No setup ({tech_signal.reason})")
             return
 
@@ -240,12 +308,26 @@ class TradingBotApp:
         # 6. Confluence Validation
         if ai_decision.action != tech_signal.action:
             logger.info(f"Execution aborted for {symbol}: Action is {ai_decision.action} (Reason: {ai_decision.reasoning})")
+            self.trading_state["last_scan_reasons"][symbol] = f"Gemini ({ai_decision.action}): {ai_decision.reasoning}"
+            await self.telegram.send_ai_rejection_alert(
+                symbol=symbol,
+                tech_signal=tech_signal,
+                ai_decision=ai_decision,
+                min_score=settings.MIN_CONFLUENCE_SCORE
+            )
             return
 
         if ai_decision.confluence_score < settings.MIN_CONFLUENCE_SCORE:
             logger.info(
                 f"Execution aborted for {symbol}: Confluence score {ai_decision.confluence_score} "
                 f"< {settings.MIN_CONFLUENCE_SCORE}"
+            )
+            self.trading_state["last_scan_reasons"][symbol] = f"Skor AI Rendah ({ai_decision.confluence_score}/100): {ai_decision.reasoning}"
+            await self.telegram.send_ai_rejection_alert(
+                symbol=symbol,
+                tech_signal=tech_signal,
+                ai_decision=ai_decision,
+                min_score=settings.MIN_CONFLUENCE_SCORE
             )
             return
 
@@ -270,6 +352,7 @@ class TradingBotApp:
         # 8. Record to SQLite Database if executed
         if order_res.get("success"):
             ticket = order_res.get("ticket")
+            self.trading_state["last_scan_reasons"][symbol] = f"EXECUTED: {ai_decision.action} {lot_size} Lot"
             self.db.record_entry(
                 ticket=ticket,
                 symbol=symbol,

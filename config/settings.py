@@ -75,6 +75,7 @@ class Settings(BaseSettings):
     # Professional Strategy Features
     PARTIAL_TP_ENABLED: bool = Field(default=True, description="Enable 50% partial take profit at 1:1 RR")
     SESSION_FILTER_ENABLED: bool = Field(default=True, description="Enable session killzones and rollover filter")
+    SCAN_REPORT_MODE: str = Field(default="1h", description="Periodic market radar scan reporting to Telegram ('1h', '15m', or 'off')")
 
     # Project Directories
     LOGS_DIR: Path = BASE_DIR / "logs"

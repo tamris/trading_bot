@@ -41,8 +41,9 @@ logger = logging.getLogger("ai_trading_bot.telegram")
 REPLY_KEYBOARD = ReplyKeyboardMarkup(
     [
         [KeyboardButton("📊 Status Akun"), KeyboardButton("📜 Riwayat Trade")],
-        [KeyboardButton("🕒 Sesi Pasar"), KeyboardButton("🚨 Tutup Semua (Panic)")],
-        [KeyboardButton("⏸️ Pause Bot"), KeyboardButton("▶️ Resume Bot")]
+        [KeyboardButton("🔍 Radar Pasar"), KeyboardButton("🕒 Sesi Pasar")],
+        [KeyboardButton("⏸️ Pause Bot"), KeyboardButton("▶️ Resume Bot")],
+        [KeyboardButton("🚨 Tutup Semua (Panic)")]
     ],
     resize_keyboard=True,
     one_time_keyboard=False
@@ -65,6 +66,8 @@ class TelegramBotManager:
         self.trading_state = trading_state
         self.db = db or TradeDatabase()
         self.gemini = gemini_analyst
+        self.radar_provider = None
+        self.scan_report_mode = getattr(settings, "SCAN_REPORT_MODE", "1h").lower().strip()
         self.token = settings.TELEGRAM_BOT_TOKEN
         self.chat_id = settings.TELEGRAM_CHAT_ID
         self.app = None
@@ -106,6 +109,8 @@ class TelegramBotManager:
                 self.app.add_handler(CommandHandler("start", self._cmd_start))
                 self.app.add_handler(CommandHandler("status", self._cmd_status))
                 self.app.add_handler(CommandHandler("history", self._cmd_history))
+                self.app.add_handler(CommandHandler("radar", self._cmd_radar))
+                self.app.add_handler(CommandHandler("report", self._cmd_report))
                 self.app.add_handler(CommandHandler("sesi", self._cmd_session))
                 self.app.add_handler(CommandHandler("session", self._cmd_session))
                 self.app.add_handler(CommandHandler("keys", self._cmd_keys))
@@ -127,6 +132,8 @@ class TelegramBotManager:
                 try:
                     await self.app.bot.set_my_commands([
                         BotCommand("status", "📊 Status Saldo & Posisi Aktif"),
+                        BotCommand("radar", "🔍 Radar Pasar (Alasan Belum Entry)"),
+                        BotCommand("report", "⏱️ Atur Notif Radar: /report 1h, 15m, off"),
                         BotCommand("history", "📜 Riwayat Trade (Entry -> Close)"),
                         BotCommand("sesi", "🕒 Status Sesi Pasar & Pair Aktif"),
                         BotCommand("keys", "🔑 Cek Pool API Key (SQLite DB)"),
@@ -311,6 +318,8 @@ class TelegramBotManager:
             await self._cmd_status(update, context)
         elif "Riwayat" in text or "History" in text:
             await self._cmd_history(update, context)
+        elif "Radar" in text:
+            await self._cmd_radar(update, context)
         elif "Sesi" in text or "Session" in text:
             await self._cmd_session(update, context)
         elif "Pool" in text or "Key" in text:
@@ -695,6 +704,80 @@ class TelegramBotManager:
             "Status database kini bersih dan siap mencatat transaksi berikutnya."
         )
         await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=REPLY_KEYBOARD)
+
+    def set_radar_provider(self, provider_func):
+        """Set callback to query live radar summary from the main trading engine."""
+        self.radar_provider = provider_func
+
+    async def _cmd_radar(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Query real-time market radar status for all monitored instruments."""
+        if self.radar_provider:
+            if asyncio.iscoroutinefunction(self.radar_provider):
+                msg = await self.radar_provider()
+            else:
+                msg = self.radar_provider()
+        else:
+            msg = "📡 *Radar Pasar:* Mesin analisa sedang bersiap. Silakan coba beberapa saat lagi."
+        await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=REPLY_KEYBOARD)
+
+    async def _cmd_report(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Configure periodic scan report frequency: /report 1h, /report 15m, /report off."""
+        args = context.args
+        if not args:
+            await update.message.reply_text(
+                f"⏱️ *Pengaturan Notifikasi Radar Pasar:*\n\n"
+                f"• *Status Saat Ini:* `{self.scan_report_mode.upper()}`\n\n"
+                "Gunakan perintah berikut untuk mengubah frekuensi:\n"
+                "• `/report 1h` -> Laporan ringkas tiap 1 jam (Menit :00)\n"
+                "• `/report 15m` -> Laporan setiap candle close M15\n"
+                "• `/report off` -> Matikan laporan berkala (hanya jika ada sinyal)",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=REPLY_KEYBOARD
+            )
+            return
+
+        choice = args[0].lower().strip()
+        if choice in ("1h", "1jam", "hourly"):
+            self.scan_report_mode = "1h"
+            msg = "✅ *Frekuensi Laporan Radar:* Diubah ke `1 JAM` (Tiap menit :00)."
+        elif choice in ("15m", "15min", "m15"):
+            self.scan_report_mode = "15m"
+            msg = "✅ *Frekuensi Laporan Radar:* Diubah ke `15 MENIT` (Tiap penutupan candle M15)."
+        elif choice in ("off", "mati", "disable"):
+            self.scan_report_mode = "off"
+            msg = "⏸️ *Laporan Berkala Dimatikan.* Notifikasi hanya akan dikirim saat ada sinyal/eksekusi."
+        else:
+            msg = "⚠️ Pilihan tidak valid. Gunakan `/report 1h`, `/report 15m`, atau `/report off`."
+
+        await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=REPLY_KEYBOARD)
+
+    async def send_ai_rejection_alert(
+        self,
+        symbol: str,
+        tech_signal: Any,
+        ai_decision: Any,
+        min_score: int = 85
+    ):
+        """Send transparent notification when Gemini AI rejects an otherwise valid technical setup."""
+        if not self.is_configured():
+            return
+
+        now_wib = get_wib_str()
+        score = getattr(ai_decision, "confluence_score", 0)
+        sentiment = getattr(ai_decision, "news_sentiment", "NEUTRAL")
+        reasoning = getattr(ai_decision, "reasoning", "Konfluensi berita tidak mencukupi")
+        action = getattr(tech_signal, "action", "SETUP")
+
+        msg = (
+            f"🤖 *[Analisis Gemini AI - {symbol} {action}]*\n\n"
+            f"• *Status Eksekusi:* DIBATALKAN ❌\n"
+            f"• *Skor Keyakinan AI:* `{score} / 100` *(Syarat minimal {min_score})*\n"
+            f"• *Sentimen Berita:* `{sentiment}`\n"
+            f"• *Alasan Penolakan AI:*\n_{reasoning}_\n\n"
+            f"• *Waktu Analisa:* `{now_wib}`\n"
+            f"💡 _Bot mencegah entry karena konfluensi berita & sentimen tidak mendukung setup teknikal._"
+        )
+        await self.send_alert(msg)
 
 
 if __name__ == "__main__":
