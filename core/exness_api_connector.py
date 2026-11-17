@@ -41,6 +41,7 @@ class ExnessApiConnector:
         self._min_interval: float = 0.55  # 550ms ensures max ~1.8 req/sec, strictly below Exness 2 req/sec limit
         self._cached_snapshot: Optional[Dict[str, Any]] = None
         self._cached_snapshot_time: float = 0.0
+        self._price_cache: Dict[str, Dict[str, Any]] = {}
 
     def _load_key(self) -> None:
         """Load Ed25519 private key from 128-hex character string or unencrypted PKCS#8 PEM."""
@@ -462,13 +463,37 @@ class ExnessApiConnector:
             "comment": "Position opened via Exness API"
         }
 
+    def get_symbol_price(self, symbol: str) -> float:
+        """
+        Fetch current market bid price using latest candle with 5-second caching.
+        """
+        inst = self.normalize_symbol(symbol)
+        now = time.time()
+        cached = getattr(self, "_price_cache", {}).get(inst)
+        if cached and (now - cached["time"]) < 5.0:
+            return cached["price"]
+
+        try:
+            df = self.fetch_rates(inst, "M15", 2)
+            if not df.empty and len(df) > 0:
+                p = float(df.iloc[-1]["close"])
+                if not hasattr(self, "_price_cache"):
+                    self._price_cache = {}
+                self._price_cache[inst] = {"price": p, "time": now}
+                return p
+        except Exception as e:
+            logger.warning(f"[Exness API] Error fetching symbol price for {inst}: {e}")
+
+        return 0.0
+
     def get_open_positions(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
         """
         Get active open positions mapped to standard MT5 dictionary format.
+        Calculates live floating PnL and real-time market prices dynamically.
         Endpoint: GET /v1/trading/accounts/{account_id}/snapshot
         """
         ok, data = self._get_snapshot()
-        if not ok or "positions" not in data:
+        if not ok or "positions" not in data or not data["positions"]:
             return []
 
         orders_by_pos = {}
@@ -477,14 +502,51 @@ class ExnessApiConnector:
             if pos_ref:
                 orders_by_pos[str(pos_ref)] = o
 
+        state = data.get("account_state", {})
+        bal = float(state.get("balance", 0.0))
+        eq = float(state.get("equity", bal))
+        total_pnl = round(eq - bal, 2)
+
+        raw_positions = data["positions"]
+        num_positions = len(raw_positions)
+
         open_list = []
-        for p in data["positions"]:
+        for p in raw_positions:
             pos_id = str(p.get("position_id"))
             inst = p.get("instrument", "")
             direction = p.get("direction", "buy").upper()
             vol = float(p.get("volume", 0.01))
             open_p = float(p.get("open_price", 0.0))
-            current_p = float(p.get("current_price", p.get("price", open_p)))
+
+            spec = self.get_symbol_info(inst)
+            c_size = spec.get("contract_size", 1.0) if spec else 1.0
+
+            # Dynamic floating PnL and current price calculation
+            if num_positions == 1:
+                # With 1 position, total unrealized PnL from Exness account equity is exact
+                profit_val = total_pnl
+                if (vol * c_size) > 0:
+                    if direction == "BUY":
+                        current_p = open_p + (profit_val / (vol * c_size))
+                    else:
+                        current_p = open_p - (profit_val / (vol * c_size))
+                else:
+                    current_p = open_p
+            else:
+                # With multiple positions, evaluate market price for each symbol
+                market_p = self.get_symbol_price(inst)
+                if market_p > 0:
+                    current_p = market_p
+                    mult = 1.0 if direction == "BUY" else -1.0
+                    raw_diff = mult * (current_p - open_p)
+                    if "JPY" in inst:
+                        profit_val = (raw_diff * vol * c_size) / current_p
+                    else:
+                        profit_val = raw_diff * vol * c_size
+                    profit_val = round(profit_val, 2)
+                else:
+                    current_p = open_p
+                    profit_val = 0.0
 
             # Retrieve SL/TP from attached order if present
             att_order = orders_by_pos.get(pos_id, {})
@@ -502,8 +564,8 @@ class ExnessApiConnector:
                 "price_open": open_p,
                 "sl": sl_val,
                 "tp": tp_val,
-                "price_current": current_p,
-                "profit": float(p.get("profit", 0.0)),
+                "price_current": round(current_p, 5 if "EUR" in inst else 2),
+                "profit": profit_val,
                 "time": p.get("create_time", "")
             })
 

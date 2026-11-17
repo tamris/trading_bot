@@ -358,13 +358,14 @@ class TradingBotApp:
         # 8. Record to SQLite Database if executed
         if order_res.get("success"):
             ticket = order_res.get("ticket")
-            self.trading_state["last_scan_reasons"][symbol] = f"EXECUTED: {ai_decision.action} {lot_size} Lot"
+            fill_price = float(order_res.get("price") or tech_signal.entry_price)
+            self.trading_state["last_scan_reasons"][symbol] = f"EXECUTED: {ai_decision.action} {lot_size} Lot @ {fill_price}"
             self.db.record_entry(
                 ticket=ticket,
                 symbol=symbol,
                 action=ai_decision.action,
                 lot=lot_size,
-                entry_price=tech_signal.entry_price,
+                entry_price=fill_price,
                 sl_price=tech_signal.sl_price,
                 tp_price=tech_signal.tp_price,
                 confluence_score=ai_decision.confluence_score,
@@ -372,17 +373,20 @@ class TradingBotApp:
             )
 
             # 9. Telegram Notification for successful trade
-            await self.telegram.send_trade_signal_alert(
-                symbol=symbol,
-                action=ai_decision.action,
-                lot_size=lot_size,
-                entry_price=tech_signal.entry_price,
-                sl=tech_signal.sl_price,
-                tp=tech_signal.tp_price,
-                confluence_score=ai_decision.confluence_score,
-                reasoning=ai_decision.reasoning,
-                order_result=order_res
-            )
+            try:
+                await self.telegram.send_trade_signal_alert(
+                    symbol=symbol,
+                    action=ai_decision.action,
+                    lot_size=lot_size,
+                    entry_price=fill_price,
+                    sl=tech_signal.sl_price,
+                    tp=tech_signal.tp_price,
+                    confluence_score=ai_decision.confluence_score,
+                    reasoning=ai_decision.reasoning,
+                    order_result=order_res
+                )
+            except Exception as tg_err:
+                logger.error(f"Failed to send trade signal alert: {tg_err}")
         else:
             err_msg = order_res.get("error", "Unknown error")
             logger.warning(f"Order for {symbol} not executed: {err_msg}")

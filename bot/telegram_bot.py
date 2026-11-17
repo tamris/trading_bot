@@ -186,7 +186,7 @@ class TelegramBotManager:
                 logger.warning(f"Error stopping Telegram Bot: {e}")
 
     async def send_alert(self, message: str, with_keyboard: bool = False):
-        """Send notification message to configured chat_id with retry on timeout."""
+        """Send notification message to configured chat_id with retry on timeout and plain-text fallback."""
         if not self.is_configured() or not self.app:
             logger.info(f"[TELEGRAM LOG ONLY]:\n{message}")
             return
@@ -203,7 +203,30 @@ class TelegramBotManager:
                 )
                 return
             except Exception as e:
+                err_str = str(e).lower()
                 logger.warning(f"Telegram send_alert attempt {attempt}/3: {e}")
+
+                # Fallback: if Telegram rejects due to markdown entity parsing, send cleanly without formatting
+                if "can't parse" in err_str or "entity" in err_str or "parse" in err_str or "badrequest" in err_str:
+                    try:
+                        clean_text = (
+                            message.replace("*", "")
+                            .replace("`", "")
+                            .replace("_", "")
+                        )
+                        await self.app.bot.send_message(
+                            chat_id=self.chat_id,
+                            text=clean_text,
+                            parse_mode=None,
+                            reply_markup=REPLY_KEYBOARD if with_keyboard else None,
+                            read_timeout=20,
+                            write_timeout=20
+                        )
+                        logger.info("Successfully delivered Telegram alert via plain text fallback.")
+                        return
+                    except Exception as fb_err:
+                        logger.error(f"Plain text fallback also failed: {fb_err}")
+
                 if attempt < 3:
                     await asyncio.sleep(2)
                 else:
@@ -226,18 +249,29 @@ class TelegramBotManager:
         order_status = f"✅ Sukses (Tiket #{order_result.get('ticket')})" if order_result.get("success") else f"⚠️ Gagal: {order_result.get('error')}"
         wib_time = get_wib_str()
 
+        # Sanitize reasoning to avoid breaking Telegram Markdown parser
+        clean_reasoning = (
+            str(reasoning or "")
+            .replace("_", " ")
+            .replace("*", "")
+            .replace("`", "'")
+            .strip()
+        )
+
+        dec = 2 if ("BTC" in symbol or "XAU" in symbol) else 5
+
         msg = (
             f"{status_icon} *ORDER EKSEKUSI BARU (ENTRY)*\n\n"
             f"• *Instrumen:* `{symbol}`\n"
             f"• *Aksi:* `{action}`\n"
             f"• *Volume:* `{lot_size}` Lot (Resiko 1.0%)\n"
-            f"• *Harga Entry:* `{entry_price:.5f}`\n"
-            f"• *Stop Loss:* `{sl:.5f}`\n"
-            f"• *Take Profit:* `{tp:.5f}`\n"
+            f"• *Harga Entry:* `{entry_price:.{dec}f}`\n"
+            f"• *Stop Loss:* `{sl:.{dec}f}`\n"
+            f"• *Take Profit:* `{tp:.{dec}f}`\n"
             f"• *Skor Konfluensi:* `{confluence_score}/100`\n"
             f"• *Waktu Entry:* `{wib_time}`\n"
             f"• *Status Broker:* {order_status}\n\n"
-            f"🧠 *Analisa AI:*\n_{reasoning}_\n"
+            f"🧠 *Analisa AI:*\n_{clean_reasoning}_\n"
         )
         await self.send_alert(msg, with_keyboard=True)
 
@@ -383,7 +417,12 @@ class TelegramBotManager:
             for p in positions:
                 profit_val = p.get("profit", 0.0)
                 pnl_symbol = "+" if profit_val >= 0 else ""
-                pos_summary += f"  - `#{p['ticket']}` {p['type']} {p['volume']} {p['symbol']} PnL: `{pnl_symbol}${profit_val:.2f}`\n"
+                cur_p = p.get("price_current", p.get("price_open", 0.0))
+                pos_summary += (
+                    f"  - `#{p['ticket']}` {p['type']} {p['volume']} {p['symbol']} "
+                    f"@ `{p['price_open']}` (Kini: `{cur_p}`) "
+                    f"PnL: `{pnl_symbol}${profit_val:.2f}`\n"
+                )
         else:
             pos_summary = "  _Tidak ada posisi yang sedang terbuka._\n"
 
@@ -765,7 +804,14 @@ class TelegramBotManager:
         now_wib = get_wib_str()
         score = getattr(ai_decision, "confluence_score", 0)
         sentiment = getattr(ai_decision, "news_sentiment", "NEUTRAL")
-        reasoning = getattr(ai_decision, "reasoning", "Konfluensi berita tidak mencukupi")
+        raw_reasoning = getattr(ai_decision, "reasoning", "Konfluensi berita tidak mencukupi")
+        clean_reasoning = (
+            str(raw_reasoning or "")
+            .replace("_", " ")
+            .replace("*", "")
+            .replace("`", "'")
+            .strip()
+        )
         action = getattr(tech_signal, "action", "SETUP")
 
         msg = (
@@ -773,7 +819,7 @@ class TelegramBotManager:
             f"• *Status Eksekusi:* DIBATALKAN ❌\n"
             f"• *Skor Keyakinan AI:* `{score} / 100` *(Syarat minimal {min_score})*\n"
             f"• *Sentimen Berita:* `{sentiment}`\n"
-            f"• *Alasan Penolakan AI:*\n_{reasoning}_\n\n"
+            f"• *Alasan Penolakan AI:*\n_{clean_reasoning}_\n\n"
             f"• *Waktu Analisa:* `{now_wib}`\n"
             f"💡 _Bot mencegah entry karena konfluensi berita & sentimen tidak mendukung setup teknikal._"
         )
