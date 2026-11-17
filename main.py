@@ -153,12 +153,13 @@ class TradingBotApp:
         print("💡 Silakan buka chat @traderkuybot di Telegram dan kirim /status")
         print("=" * 60 + "\n")
 
-        # Run an initial evaluation immediately on startup
+        # Run an initial evaluation immediately on startup (sync active positions, closed deals, & run pipeline)
         try:
-            logger.info("Running initial pipeline check on startup...")
+            logger.info("Running initial broker sync & position check on startup...")
+            await self.monitor_breakeven()
             await self.run_pipeline_cycle()
         except Exception as e:
-            logger.error(f"Error during initial pipeline check on startup: {e}")
+            logger.error(f"Error during startup checks: {e}")
 
     async def stop(self):
         """Clean shutdown of all subsystems."""

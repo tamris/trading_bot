@@ -520,7 +520,37 @@ class TelegramBotManager:
         await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=REPLY_KEYBOARD)
 
     async def _cmd_history(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Display recent trade history and win rate from SQLite database."""
+        """Display recent trade history and win rate from SQLite database with live broker sync."""
+        self._register_active_chat(update)
+
+        # Synchronize closed deals directly from broker history so history is always up to date
+        if hasattr(self.mt5, "get_recent_closed_positions"):
+            try:
+                recent_closed = self.mt5.get_recent_closed_positions(days_back=7)
+                for rc in recent_closed:
+                    t = rc["ticket"]
+                    if not self.db.is_trade_closed(t):
+                        if not self.db.get_trade_by_ticket(t):
+                            self.db.record_entry(
+                                ticket=t,
+                                symbol=rc["symbol"],
+                                action=rc["action"],
+                                lot=rc["lot"],
+                                entry_price=rc["entry_price"],
+                                sl_price=0.0,
+                                tp_price=rc["close_price"],
+                                confluence_score=85,
+                                ai_reasoning="Broker history sync"
+                            )
+                        self.db.record_close(
+                            ticket=t,
+                            close_price=rc["close_price"],
+                            profit_loss=rc["profit"],
+                            close_reason=rc["reason"]
+                        )
+            except Exception as sync_e:
+                logger.warning(f"Error syncing history from broker in _cmd_history: {sync_e}")
+
         stats = self.db.get_summary_stats()
         trades = self.db.get_recent_trades(limit=5)
 
