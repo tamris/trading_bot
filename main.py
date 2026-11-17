@@ -9,6 +9,7 @@ import asyncio
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from logging.handlers import RotatingFileHandler
+from typing import Tuple, Dict, Any, Optional, List
 import psutil
 
 # Force IPv4 for api.telegram.org to prevent IPv6 blackhole timeouts on Indonesian ISPs
