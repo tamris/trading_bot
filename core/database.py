@@ -65,11 +65,32 @@ class TradeDatabase:
                     close_time TEXT,
                     close_reason TEXT,
                     profit_loss REAL DEFAULT 0.0,
-                    status TEXT DEFAULT 'OPEN'
+                    status TEXT DEFAULT 'OPEN',
+                    entry_alert_sent INTEGER DEFAULT 0,
+                    close_alert_sent INTEGER DEFAULT 0
                 )
             """)
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_status ON trades(status)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_symbol ON trades(symbol)")
+
+            # Auto-migrate table if created with previous schema
+            cursor.execute("PRAGMA table_info(trades)")
+            cols = [col["name"] for col in cursor.fetchall()]
+            if "entry_alert_sent" not in cols:
+                cursor.execute("ALTER TABLE trades ADD COLUMN entry_alert_sent INTEGER DEFAULT 0")
+            if "close_alert_sent" not in cols:
+                cursor.execute("ALTER TABLE trades ADD COLUMN close_alert_sent INTEGER DEFAULT 0")
+
+            # Table for persistent Telegram subscribers
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS telegram_subscribers (
+                    chat_id TEXT PRIMARY KEY,
+                    username TEXT DEFAULT '',
+                    first_name TEXT DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    last_active_at TEXT NOT NULL
+                )
+            """)
 
             # Table for persistent Gemini API Key Pool
             cursor.execute("""
@@ -89,6 +110,69 @@ class TradeDatabase:
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_key_status ON api_keys(status)")
             conn.commit()
 
+    def add_subscriber(self, chat_id: str, username: str = "", first_name: str = ""):
+        """Persist or update an active Telegram subscriber."""
+        now_str = get_wib_str()
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    INSERT INTO telegram_subscribers (chat_id, username, first_name, created_at, last_active_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(chat_id) DO UPDATE SET
+                        username = excluded.username,
+                        first_name = excluded.first_name,
+                        last_active_at = excluded.last_active_at
+                """, (str(chat_id), str(username or ""), str(first_name or ""), now_str, now_str))
+                conn.commit()
+        except Exception as e:
+            logger.warning(f"[DB] Error saving subscriber {chat_id}: {e}")
+
+    def get_subscribers(self) -> List[str]:
+        """Fetch all unique subscriber chat IDs."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT chat_id FROM telegram_subscribers")
+                return [str(row["chat_id"]) for row in cursor.fetchall()]
+        except Exception as e:
+            logger.warning(f"[DB] Error fetching subscribers: {e}")
+            return []
+
+    def mark_entry_alert_sent(self, ticket: int) -> bool:
+        """Mark that the entry alert was successfully delivered to Telegram."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("UPDATE trades SET entry_alert_sent = 1 WHERE ticket = ?", (ticket,))
+                conn.commit()
+                return cursor.rowcount > 0
+        except Exception as e:
+            logger.error(f"[DB] Error marking entry alert for #{ticket}: {e}")
+            return False
+
+    def mark_close_alert_sent(self, ticket: int) -> bool:
+        """Mark that the close alert (TP/SL) was successfully delivered to Telegram."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("UPDATE trades SET close_alert_sent = 1 WHERE ticket = ?", (ticket,))
+                conn.commit()
+                return cursor.rowcount > 0
+        except Exception as e:
+            logger.error(f"[DB] Error marking close alert for #{ticket}: {e}")
+            return False
+
+    def is_entry_alert_sent(self, ticket: int) -> bool:
+        """Check if an entry alert has already been sent for this trade."""
+        trade = self.get_trade_by_ticket(ticket)
+        return bool(trade and trade.get("entry_alert_sent", 0) == 1)
+
+    def is_close_alert_sent(self, ticket: int) -> bool:
+        """Check if a close alert has already been sent for this trade."""
+        trade = self.get_trade_by_ticket(ticket)
+        return bool(trade and trade.get("close_alert_sent", 0) == 1)
+
     def record_entry(
         self,
         ticket: int,
@@ -99,7 +183,8 @@ class TradeDatabase:
         sl_price: float,
         tp_price: float,
         confluence_score: int = 0,
-        ai_reasoning: str = ""
+        ai_reasoning: str = "",
+        entry_alert_sent: int = 0
     ) -> bool:
         """Insert a newly executed trade with OPEN status."""
         entry_time_str = get_wib_str()
@@ -109,11 +194,13 @@ class TradeDatabase:
                 cursor.execute("""
                     INSERT OR REPLACE INTO trades (
                         ticket, symbol, action, lot, entry_price, sl_price, tp_price,
-                        entry_time, confluence_score, ai_reasoning, status
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN')
+                        entry_time, confluence_score, ai_reasoning, status, entry_alert_sent
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?)
                 """, (
-                    ticket, symbol, action.upper(), lot, entry_price, sl_price, tp_price,
-                    entry_time_str, confluence_score, ai_reasoning
+                    ticket, symbol, action.upper(), float(lot), float(entry_price),
+                    float(sl_price or 0.0), float(tp_price or 0.0),
+                    entry_time_str, int(confluence_score or 0), str(ai_reasoning or ""),
+                    int(entry_alert_sent)
                 ))
                 conn.commit()
                 logger.info(f"[DB] Trade #{ticket} recorded as OPEN in SQLite (WIB: {entry_time_str}).")
@@ -127,22 +214,35 @@ class TradeDatabase:
         ticket: int,
         close_price: float,
         profit_loss: float,
-        close_reason: str = "MANUAL_CLOSE"
+        close_reason: str = "MANUAL_CLOSE",
+        close_alert_sent: Optional[int] = None
     ) -> bool:
         """Update an existing trade with exit details and set status to CLOSED."""
         close_time_str = get_wib_str()
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
-                cursor.execute("""
-                    UPDATE trades
-                    SET close_price = ?,
-                        close_time = ?,
-                        profit_loss = ?,
-                        close_reason = ?,
-                        status = 'CLOSED'
-                    WHERE ticket = ?
-                """, (close_price, close_time_str, profit_loss, close_reason, ticket))
+                if close_alert_sent is not None:
+                    cursor.execute("""
+                        UPDATE trades
+                        SET close_price = ?,
+                            close_time = ?,
+                            profit_loss = ?,
+                            close_reason = ?,
+                            status = 'CLOSED',
+                            close_alert_sent = ?
+                        WHERE ticket = ?
+                    """, (float(close_price), close_time_str, float(profit_loss), str(close_reason), int(close_alert_sent), ticket))
+                else:
+                    cursor.execute("""
+                        UPDATE trades
+                        SET close_price = ?,
+                            close_time = ?,
+                            profit_loss = ?,
+                            close_reason = ?,
+                            status = 'CLOSED'
+                        WHERE ticket = ?
+                    """, (float(close_price), close_time_str, float(profit_loss), str(close_reason), ticket))
                 conn.commit()
                 logger.info(f"[DB] Trade #{ticket} marked as CLOSED (Reason: {close_reason}, PnL: ${profit_loss:.2f}).")
                 return True

@@ -370,12 +370,13 @@ class TradingBotApp:
                 sl_price=tech_signal.sl_price,
                 tp_price=tech_signal.tp_price,
                 confluence_score=ai_decision.confluence_score,
-                ai_reasoning=ai_decision.reasoning
+                ai_reasoning=ai_decision.reasoning,
+                entry_alert_sent=0
             )
 
             # 9. Telegram Notification for successful trade
             try:
-                await self.telegram.send_trade_signal_alert(
+                sent_ok = await self.telegram.send_trade_signal_alert(
                     symbol=symbol,
                     action=ai_decision.action,
                     lot_size=lot_size,
@@ -386,6 +387,8 @@ class TradingBotApp:
                     reasoning=ai_decision.reasoning,
                     order_result=order_res
                 )
+                if sent_ok:
+                    self.db.mark_entry_alert_sent(ticket)
             except Exception as tg_err:
                 logger.error(f"Failed to send trade signal alert: {tg_err}")
         else:
@@ -445,7 +448,7 @@ class TradingBotApp:
                         msg = f"🛡️ *Break-Even Aktif (WIB):* Stop Loss dipindahkan ke harga Entry (`{entry_p}`) untuk Tiket `#{t}`."
                         await self.telegram.send_alert(msg)
 
-            # 3. Synchronize any active broker positions into SQLite if missing
+            # 3. Synchronize any active broker positions into SQLite if missing & alert if not sent
             current_mt5_positions = self.mt5.get_open_positions()
             active_tickets = {p["ticket"] for p in current_mt5_positions}
 
@@ -462,8 +465,28 @@ class TradingBotApp:
                         sl_price=p["sl"],
                         tp_price=p["tp"],
                         confluence_score=85,
-                        ai_reasoning="Active position synced from broker"
+                        ai_reasoning="Active position synced from broker",
+                        entry_alert_sent=0
                     )
+
+                # Ensure entry alert was sent for active trade
+                if not self.db.is_entry_alert_sent(t):
+                    try:
+                        sent_ok = await self.telegram.send_trade_signal_alert(
+                            symbol=p["symbol"],
+                            action=p["type"],
+                            lot_size=p["volume"],
+                            entry_price=p["price_open"],
+                            sl=p["sl"],
+                            tp=p["tp"],
+                            confluence_score=85,
+                            reasoning="Posisi aktif sinkronisasi broker (Exness Live)",
+                            order_result={"success": True, "ticket": t}
+                        )
+                        if sent_ok:
+                            self.db.mark_entry_alert_sent(t)
+                    except Exception as e:
+                        logger.error(f"Error alerting active trade #{t}: {e}")
 
             # 4. Check for closed trades from SQLite tracked trades
             open_db_trades = self.db.get_open_trades()
@@ -486,29 +509,36 @@ class TradingBotApp:
                         ticket=ticket,
                         close_price=close_price,
                         profit_loss=pnl,
-                        close_reason=reason
+                        close_reason=reason,
+                        close_alert_sent=0
                     )
                     self.risk_manager.record_symbol_exit(trade["symbol"])
 
-                    await self.telegram.send_trade_close_alert(
-                        ticket=ticket,
-                        symbol=trade["symbol"],
-                        action=trade["action"],
-                        lot_size=trade["lot"],
-                        entry_price=trade["entry_price"],
-                        close_price=close_price,
-                        pnl=pnl,
-                        reason=reason,
-                        entry_time=trade["entry_time"],
-                        close_time=close_time_wib
-                    )
+                    if not self.db.is_close_alert_sent(ticket):
+                        try:
+                            sent_ok = await self.telegram.send_trade_close_alert(
+                                ticket=ticket,
+                                symbol=trade["symbol"],
+                                action=trade["action"],
+                                lot_size=trade["lot"],
+                                entry_price=trade["entry_price"],
+                                close_price=close_price,
+                                pnl=pnl,
+                                reason=reason,
+                                entry_time=trade["entry_time"],
+                                close_time=close_time_wib
+                            )
+                            if sent_ok:
+                                self.db.mark_close_alert_sent(ticket)
+                        except Exception as e:
+                            logger.error(f"Error sending close alert for #{ticket}: {e}")
 
             # 5. Dual-Protection: Query recent closed positions directly from broker history
             if hasattr(self.mt5, "get_recent_closed_positions"):
                 recent_closed = self.mt5.get_recent_closed_positions(days_back=2)
                 for rc in recent_closed:
                     t = rc["ticket"]
-                    if not self.db.is_trade_closed(t):
+                    if not self.db.is_close_alert_sent(t):
                         close_time_wib = get_wib_str()
                         if not self.db.get_trade_by_ticket(t):
                             self.db.record_entry(
@@ -520,29 +550,36 @@ class TradingBotApp:
                                 sl_price=0.0,
                                 tp_price=rc["close_price"],
                                 confluence_score=85,
-                                ai_reasoning="Broker history closed trade sync"
+                                ai_reasoning="Broker history closed trade sync",
+                                entry_alert_sent=1
                             )
 
                         self.db.record_close(
                             ticket=t,
                             close_price=rc["close_price"],
                             profit_loss=rc["profit"],
-                            close_reason=rc["reason"]
+                            close_reason=rc["reason"],
+                            close_alert_sent=0
                         )
                         self.risk_manager.record_symbol_exit(rc["symbol"])
 
-                        await self.telegram.send_trade_close_alert(
-                            ticket=t,
-                            symbol=rc["symbol"],
-                            action=rc["action"],
-                            lot_size=rc["lot"],
-                            entry_price=rc["entry_price"],
-                            close_price=rc["close_price"],
-                            pnl=rc["profit"],
-                            reason=rc["reason"],
-                            entry_time=rc.get("entry_time") or close_time_wib,
-                            close_time=close_time_wib
-                        )
+                        try:
+                            sent_ok = await self.telegram.send_trade_close_alert(
+                                ticket=t,
+                                symbol=rc["symbol"],
+                                action=rc["action"],
+                                lot_size=rc["lot"],
+                                entry_price=rc["entry_price"],
+                                close_price=rc["close_price"],
+                                pnl=rc["profit"],
+                                reason=rc["reason"],
+                                entry_time=rc.get("entry_time") or close_time_wib,
+                                close_time=rc.get("close_time") or close_time_wib
+                            )
+                            if sent_ok:
+                                self.db.mark_close_alert_sent(t)
+                        except Exception as e:
+                            logger.error(f"Error sending broker history close alert for #{t}: {e}")
         except Exception as e:
             logger.error(f"Error in monitor_breakeven: {e}")
 

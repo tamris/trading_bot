@@ -53,6 +53,8 @@ REPLY_KEYBOARD = ReplyKeyboardMarkup(
 class TelegramBotManager:
     """Manages Telegram bot alerts, interactive keyboard menus, and SQLite trade history."""
 
+    PERMANENT_DEFAULT_CHATS = ["5443625348", "7030527954"]
+
     def __init__(
         self,
         mt5_connector: MT5Connector,
@@ -78,18 +80,34 @@ class TelegramBotManager:
         self._is_running = False
 
     def is_configured(self) -> bool:
-        return bool(self.token and (self._configured_chat_ids or self.chat_id))
+        return bool(self.token and (self._configured_chat_ids or self.chat_id or self.PERMANENT_DEFAULT_CHATS))
 
     def _register_active_chat(self, update: Optional[Update]):
-        """Dynamically register chat ID from user interaction so all active users receive alerts."""
+        """Dynamically register chat ID from user interaction and persist in DB."""
         if update and update.effective_chat:
-            self._active_chat_ids.add(str(update.effective_chat.id))
+            cid = str(update.effective_chat.id)
+            self._active_chat_ids.add(cid)
+            if self.db:
+                try:
+                    user = update.effective_user
+                    username = getattr(user, "username", "") or ""
+                    first_name = getattr(user, "first_name", "") or ""
+                    self.db.add_subscriber(cid, username, first_name)
+                except Exception as e:
+                    logger.warning(f"Error saving subscriber {cid}: {e}")
 
     @property
     def target_chat_ids(self) -> List[str]:
-        """All unique target chat IDs (configured + actively communicating users)."""
+        """All unique target chat IDs (configured + permanent defaults + active db subscribers)."""
         all_ids = set(self._configured_chat_ids)
+        all_ids.update(self.PERMANENT_DEFAULT_CHATS)
         all_ids.update(self._active_chat_ids)
+        if self.db:
+            try:
+                db_subs = self.db.get_subscribers()
+                all_ids.update(db_subs)
+            except Exception as e:
+                logger.warning(f"Error loading subscribers from db: {e}")
         if not all_ids and self.chat_id:
             all_ids.add(str(self.chat_id).strip())
         return [cid for cid in all_ids if cid]
@@ -203,13 +221,18 @@ class TelegramBotManager:
             except Exception as e:
                 logger.warning(f"Error stopping Telegram Bot: {e}")
 
-    async def send_alert(self, message: str, with_keyboard: bool = False):
+    async def send_alert(self, message: str, with_keyboard: bool = False) -> bool:
         """Send notification message to all target chat IDs with retry on timeout and plain-text fallback."""
         if not self.is_configured() or not self.app:
             logger.info(f"[TELEGRAM LOG ONLY]:\n{message}")
-            return
+            return False
 
         targets = self.target_chat_ids
+        if not targets:
+            logger.warning(f"No target chat IDs configured. Message not sent: {message[:60]}")
+            return False
+
+        any_success = False
         for target_id in targets:
             for attempt in range(1, 4):
                 try:
@@ -221,6 +244,7 @@ class TelegramBotManager:
                         read_timeout=20,
                         write_timeout=20
                     )
+                    any_success = True
                     break
                 except Exception as e:
                     err_str = str(e).lower()
@@ -243,6 +267,7 @@ class TelegramBotManager:
                                 write_timeout=20
                             )
                             logger.info(f"Successfully delivered alert to {target_id} via plain text fallback.")
+                            any_success = True
                             break
                         except Exception as fb_err:
                             logger.error(f"Plain text fallback to {target_id} also failed: {fb_err}")
@@ -251,6 +276,8 @@ class TelegramBotManager:
                         await asyncio.sleep(2)
                     else:
                         logger.error(f"Failed to send Telegram alert to {target_id} after 3 attempts: {e}")
+
+        return any_success
 
     async def send_trade_signal_alert(
         self,
@@ -263,37 +290,48 @@ class TelegramBotManager:
         confluence_score: int,
         reasoning: str,
         order_result: Dict[str, Any]
-    ):
+    ) -> bool:
         """Format and broadcast detailed trade execution report in WIB."""
-        status_icon = "🟢" if action == "BUY" else "🔴"
-        order_status = f"✅ Sukses (Tiket #{order_result.get('ticket')})" if order_result.get("success") else f"⚠️ Gagal: {order_result.get('error')}"
-        wib_time = get_wib_str()
+        try:
+            status_icon = "🟢" if str(action).upper() == "BUY" else "🔴"
+            order_status = f"✅ Sukses (Tiket #{order_result.get('ticket')})" if order_result.get("success") else f"⚠️ Gagal: {order_result.get('error')}"
+            wib_time = get_wib_str()
 
-        # Sanitize reasoning to avoid breaking Telegram Markdown parser
-        clean_reasoning = (
-            str(reasoning or "")
-            .replace("_", " ")
-            .replace("*", "")
-            .replace("`", "'")
-            .strip()
-        )
+            # Sanitize reasoning to avoid breaking Telegram Markdown parser
+            clean_reasoning = (
+                str(reasoning or "")
+                .replace("_", " ")
+                .replace("*", "")
+                .replace("`", "'")
+                .strip()
+            )
+            if not clean_reasoning:
+                clean_reasoning = "Analisa AI mengonfirmasi setup teknikal sesuai aturan."
 
-        dec = 2 if ("BTC" in symbol or "XAU" in symbol) else 5
+            ep = float(entry_price or 0.0)
+            sl_val = float(sl or 0.0)
+            tp_val = float(tp or 0.0)
+            lot_val = float(lot_size or 0.01)
 
-        msg = (
-            f"{status_icon} *ORDER EKSEKUSI BARU (ENTRY)*\n\n"
-            f"• *Instrumen:* `{symbol}`\n"
-            f"• *Aksi:* `{action}`\n"
-            f"• *Volume:* `{lot_size}` Lot (Resiko 1.0%)\n"
-            f"• *Harga Entry:* `{entry_price:.{dec}f}`\n"
-            f"• *Stop Loss:* `{sl:.{dec}f}`\n"
-            f"• *Take Profit:* `{tp:.{dec}f}`\n"
-            f"• *Skor Konfluensi:* `{confluence_score}/100`\n"
-            f"• *Waktu Entry:* `{wib_time}`\n"
-            f"• *Status Broker:* {order_status}\n\n"
-            f"🧠 *Analisa AI:*\n_{clean_reasoning}_\n"
-        )
-        await self.send_alert(msg, with_keyboard=True)
+            dec = 3 if "JPY" in symbol else (2 if ("BTC" in symbol or "XAU" in symbol) else 5)
+
+            msg = (
+                f"{status_icon} *ORDER EKSEKUSI BARU (ENTRY)*\n\n"
+                f"• *Instrumen:* `{symbol}`\n"
+                f"• *Aksi:* `{action}`\n"
+                f"• *Volume:* `{lot_val:.2f}` Lot (Resiko 1.0%)\n"
+                f"• *Harga Entry:* `{ep:.{dec}f}`\n"
+                f"• *Stop Loss:* `{sl_val:.{dec}f}`\n"
+                f"• *Take Profit:* `{tp_val:.{dec}f}`\n"
+                f"• *Skor Konfluensi:* `{confluence_score}/100`\n"
+                f"• *Waktu Entry:* `{wib_time}`\n"
+                f"• *Status Broker:* {order_status}\n\n"
+                f"🧠 *Analisa AI:*\n_{clean_reasoning}_\n"
+            )
+            return await self.send_alert(msg, with_keyboard=True)
+        except Exception as e:
+            logger.error(f"Error preparing trade signal alert: {e}")
+            return False
 
     async def send_trade_close_alert(
         self,
@@ -307,34 +345,48 @@ class TelegramBotManager:
         reason: str,
         entry_time: str,
         close_time: str
-    ):
+    ) -> bool:
         """Broadcast real-time close report (TP, SL, BEP, or Manual Close)."""
-        if reason == "TAKE_PROFIT":
-            title = "🎯 *TARGET TERCAPAI (TAKE PROFIT)!*"
-            icon = "💰"
-        elif reason == "STOP_LOSS":
-            title = "🛑 *TERKENA STOP LOSS*"
-            icon = "⚠️"
-        elif "BREAK_EVEN" in reason or "BEP" in reason:
-            title = "🛡️ *EXIT AT BREAK-EVEN*"
-            icon = "🔒"
-        else:
-            title = "🏁 *POSISI DITUTUP (CLOSED)*"
-            icon = "📊"
+        try:
+            r_upper = str(reason or "").upper()
+            if "TAKE_PROFIT" in r_upper or "TP" in r_upper:
+                title = "🎯 *TARGET TERCAPAI (TAKE PROFIT)!*"
+                icon = "💰"
+            elif "STOP_LOSS" in r_upper or "SL" in r_upper:
+                title = "🛑 *TERKENA STOP LOSS*"
+                icon = "⚠️"
+            elif "BREAK_EVEN" in r_upper or "BEP" in r_upper:
+                title = "🛡️ *EXIT AT BREAK-EVEN*"
+                icon = "🔒"
+            else:
+                title = "🏁 *POSISI DITUTUP (CLOSED)*"
+                icon = "📊"
 
-        pnl_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
+            ep = float(entry_price or 0.0)
+            cp = float(close_price or 0.0)
+            pnl_val = float(pnl or 0.0)
+            lot_val = float(lot_size or 0.01)
 
-        msg = (
-            f"{title}\n\n"
-            f"• *Tiket:* `#{ticket}`\n"
-            f"• *Instrumen:* `{symbol}` ({action})\n"
-            f"• *Volume:* `{lot_size}` Lot\n"
-            f"• *Harga Entry:* `{entry_price:.5f}` ({entry_time})\n"
-            f"• *Harga Exit:* `{close_price:.5f}` ({close_time})\n"
-            f"• *Alasan Exit:* `{reason}`\n"
-            f"• *Hasil PnL:* `{pnl_str}` {icon}\n"
-        )
-        await self.send_alert(msg, with_keyboard=True)
+            dec = 3 if "JPY" in symbol else (2 if ("BTC" in symbol or "XAU" in symbol) else 5)
+            pnl_str = f"+${pnl_val:.2f}" if pnl_val >= 0 else f"-${abs(pnl_val):.2f}"
+
+            clean_entry_time = str(entry_time or "").replace("T", " ")[:19]
+            clean_close_time = str(close_time or "").replace("T", " ")[:19]
+
+            msg = (
+                f"{title}\n\n"
+                f"• *Tiket:* `#{ticket}`\n"
+                f"• *Instrumen:* `{symbol}` ({action})\n"
+                f"• *Volume:* `{lot_val:.2f}` Lot\n"
+                f"• *Harga Entry:* `{ep:.{dec}f}` ({clean_entry_time})\n"
+                f"• *Harga Exit:* `{cp:.{dec}f}` ({clean_close_time})\n"
+                f"• *Alasan Exit:* `{reason}`\n"
+                f"• *Hasil PnL:* `{pnl_str}` {icon}\n"
+            )
+            return await self.send_alert(msg, with_keyboard=True)
+        except Exception as e:
+            logger.error(f"Error preparing trade close alert: {e}")
+            return False
 
     async def send_partial_tp_alert(
         self,
@@ -345,21 +397,30 @@ class TelegramBotManager:
         partial_pnl: float,
         entry_price: float,
         close_price: float
-    ):
+    ) -> bool:
         """Broadcast alert when 50% partial take profit is locked in and SL is moved to BEP."""
-        pnl_str = f"+${partial_pnl:.2f}" if partial_pnl >= 0 else f"-${abs(partial_pnl):.2f}"
-        msg = (
-            "🎯 *PARTIAL TAKE PROFIT TERCAPAI (TP1 - 50%)!*\n\n"
-            f"• *Tiket:* `#{ticket}`\n"
-            f"• *Instrumen:* `{symbol}`\n"
-            f"• *Volume Ditutup:* `{closed_lot}` Lot (Amankan Profit)\n"
-            f"• *Volume Berjalan:* `{remaining_lot}` Lot (Risk-Free)\n"
-            f"• *Profit Diamankan:* `{pnl_str}` 💰\n"
-            f"• *Harga Exit TP1:* `{close_price:.5f}`\n"
-            f"• *Proteksi:* 🛡️ Stop Loss otomatis digeser ke harga Entry (`{entry_price:.5f}`).\n\n"
-            "Posisi sisa sekarang *100% BEBAS RESIKO RUGI* mengejar target TP maksimal!"
-        )
-        await self.send_alert(msg, with_keyboard=True)
+        try:
+            pnl_val = float(partial_pnl or 0.0)
+            pnl_str = f"+${pnl_val:.2f}" if pnl_val >= 0 else f"-${abs(pnl_val):.2f}"
+            ep = float(entry_price or 0.0)
+            cp = float(close_price or 0.0)
+            dec = 3 if "JPY" in symbol else (2 if ("BTC" in symbol or "XAU" in symbol) else 5)
+
+            msg = (
+                "🎯 *PARTIAL TAKE PROFIT TERCAPAI (TP1 - 50%)!*\n\n"
+                f"• *Tiket:* `#{ticket}`\n"
+                f"• *Instrumen:* `{symbol}`\n"
+                f"• *Volume Ditutup:* `{float(closed_lot):.2f}` Lot (Amankan Profit)\n"
+                f"• *Volume Berjalan:* `{float(remaining_lot):.2f}` Lot (Risk-Free)\n"
+                f"• *Profit Diamankan:* `{pnl_str}` 💰\n"
+                f"• *Harga Exit TP1:* `{cp:.{dec}f}`\n"
+                f"• *Proteksi:* 🛡️ Stop Loss otomatis digeser ke harga Entry (`{ep:.{dec}f}`).\n\n"
+                "Posisi sisa sekarang *100% BEBAS RESIKO RUGI* mengejar target TP maksimal!"
+            )
+            return await self.send_alert(msg, with_keyboard=True)
+        except Exception as e:
+            logger.error(f"Error preparing partial TP alert: {e}")
+            return False
 
     # ==========================================
     # Interactive Button Router
@@ -523,7 +584,29 @@ class TelegramBotManager:
         """Display recent trade history and win rate from SQLite database with live broker sync."""
         self._register_active_chat(update)
 
-        # Synchronize closed deals directly from broker history so history is always up to date
+        # 1. Synchronize open positions directly from broker so open trades are always present
+        if hasattr(self.mt5, "get_open_positions"):
+            try:
+                open_pos = self.mt5.get_open_positions()
+                for p in open_pos:
+                    t = p["ticket"]
+                    if not self.db.get_trade_by_ticket(t):
+                        self.db.record_entry(
+                            ticket=t,
+                            symbol=p["symbol"],
+                            action=p["type"],
+                            lot=p["volume"],
+                            entry_price=p["price_open"],
+                            sl_price=p["sl"],
+                            tp_price=p["tp"],
+                            confluence_score=85,
+                            ai_reasoning="Broker active position sync",
+                            entry_alert_sent=1
+                        )
+            except Exception as sync_op_err:
+                logger.warning(f"Error syncing open positions in _cmd_history: {sync_op_err}")
+
+        # 2. Synchronize closed deals directly from broker history so history is always up to date
         if hasattr(self.mt5, "get_recent_closed_positions"):
             try:
                 recent_closed = self.mt5.get_recent_closed_positions(days_back=7)
@@ -540,7 +623,8 @@ class TelegramBotManager:
                                 sl_price=0.0,
                                 tp_price=rc["close_price"],
                                 confluence_score=85,
-                                ai_reasoning="Broker history sync"
+                                ai_reasoning="Broker history sync",
+                                entry_alert_sent=1
                             )
                         self.db.record_close(
                             ticket=t,
@@ -578,17 +662,27 @@ class TelegramBotManager:
 
         if not trades:
             msg = header + "\n_Belum ada riwayat transaksi yang tercatat di database._"
-            await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=REPLY_KEYBOARD)
+            try:
+                await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=REPLY_KEYBOARD)
+            except Exception:
+                await update.message.reply_text(msg.replace("*", "").replace("_", ""), parse_mode=None, reply_markup=REPLY_KEYBOARD)
             return
 
         body = "*5 Transaksi Terakhir:*\n\n"
         for idx, t in enumerate(trades, 1):
             status = t["status"]
+            sym = t.get("symbol", "")
+            dec = 3 if "JPY" in sym else (2 if ("BTC" in sym or "XAU" in sym) else 5)
+            ep = float(t.get("entry_price") or 0.0)
+
             if status == "OPEN":
                 icon = "🟢 [OPEN]"
-                res_str = f"Entry: `{t['entry_price']}` | SL: `{t['sl_price']}` | TP: `{t['tp_price']}`"
+                sl_p = float(t.get("sl_price") or 0.0)
+                tp_p = float(t.get("tp_price") or 0.0)
+                res_str = f"Entry: `{ep:.{dec}f}` | SL: `{sl_p:.{dec}f}` | TP: `{tp_p:.{dec}f}`"
             else:
-                pnl = t.get("profit_loss", 0.0)
+                pnl = float(t.get("profit_loss") or 0.0)
+                cp = float(t.get("close_price") or 0.0)
                 reason = t.get("close_reason", "CLOSED")
                 if "BREAK_EVEN" in reason or "BEP" in reason or abs(pnl) <= 0.05:
                     icon = "🛡️ [BEP: $0.00]"
@@ -596,20 +690,33 @@ class TelegramBotManager:
                     icon = f"🎯 [TP: +${pnl:.2f}]"
                 else:
                     icon = f"🛑 [SL: -${abs(pnl):.2f}]"
-                res_str = f"Exit: `{t.get('close_price')}` ({t.get('close_time', '')})"
+                clean_close_t = str(t.get("close_time", "")).replace("T", " ")[:19]
+                res_str = f"Exit: `{cp:.{dec}f}` ({clean_close_t})"
 
+            clean_entry_t = str(t.get("entry_time", "")).replace("T", " ")[:19]
             body += (
-                f"{idx}. {icon} `#{t['ticket']}` *{t['symbol']}* ({t['action']} {t['lot']} Lot)\n"
-                f"   • Waktu Entry: `{t['entry_time']}`\n"
+                f"{idx}. {icon} `#{t['ticket']}` *{sym}* ({t['action']} {t['lot']} Lot)\n"
+                f"   • Waktu Entry: `{clean_entry_t}`\n"
                 f"   • {res_str}\n"
             )
             if t.get("ai_reasoning"):
-                # Short snippet
-                snippet = t["ai_reasoning"][:65] + "..." if len(t["ai_reasoning"]) > 65 else t["ai_reasoning"]
+                clean_r = (
+                    str(t["ai_reasoning"])
+                    .replace("_", " ")
+                    .replace("*", "")
+                    .replace("`", "'")
+                    .strip()
+                )
+                snippet = clean_r[:65] + "..." if len(clean_r) > 65 else clean_r
                 body += f"   • _Catatan: {snippet}_\n"
             body += "\n"
 
-        await update.message.reply_text(header + body, parse_mode=ParseMode.MARKDOWN, reply_markup=REPLY_KEYBOARD)
+        full_msg = header + body
+        try:
+            await update.message.reply_text(full_msg, parse_mode=ParseMode.MARKDOWN, reply_markup=REPLY_KEYBOARD)
+        except Exception:
+            clean_text = full_msg.replace("*", "").replace("`", "").replace("_", "")
+            await update.message.reply_text(clean_text, parse_mode=None, reply_markup=REPLY_KEYBOARD)
 
     async def _cmd_keys(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Display status of all Gemini API keys in the rotation pool."""

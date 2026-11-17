@@ -39,10 +39,10 @@ class Settings(BaseSettings):
 
     # Telegram Bot Settings
     TELEGRAM_BOT_TOKEN: str = Field(default="", description="Telegram Bot Token from BotFather")
-    TELEGRAM_CHAT_ID: str = Field(default="", description="Telegram Chat ID for alerts and monitoring")
+    TELEGRAM_CHAT_ID: str = Field(default="5443625348,7030527954", description="Telegram Chat ID for alerts and monitoring")
 
     # Trading Symbol & Timeframes
-    SYMBOLS_RAW: str = Field(default="XAUUSD,EURUSD", alias="SYMBOLS", description="Comma-separated symbols to trade")
+    SYMBOLS_RAW: str = Field(default="BTCUSD,XAUUSD,EURUSD,USDJPY", alias="SYMBOLS", description="Comma-separated symbols to trade")
     TIMEFRAME_MACRO: str = Field(default="H1", description="Macro trend timeframe")
     TIMEFRAME_ENTRY: str = Field(default="M15", description="Entry execution timeframe")
 
