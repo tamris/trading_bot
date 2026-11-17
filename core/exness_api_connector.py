@@ -553,8 +553,7 @@ class ExnessApiConnector:
             sl_val = float(att_order.get("stop_loss_price") or 0.0)
             tp_val = float(att_order.get("take_profit_price") or 0.0)
 
-            # Match symbol format with or without 'm' suffix
-            mapped_sym = inst + "m" if not inst.endswith("m") else inst
+            mapped_sym = inst
 
             open_list.append({
                 "ticket": int(pos_id),

@@ -70,11 +70,29 @@ class TelegramBotManager:
         self.scan_report_mode = getattr(settings, "SCAN_REPORT_MODE", "1h").lower().strip()
         self.token = settings.TELEGRAM_BOT_TOKEN
         self.chat_id = settings.TELEGRAM_CHAT_ID
+        self._configured_chat_ids: List[str] = [
+            cid.strip() for cid in str(self.chat_id or "").split(",") if cid.strip()
+        ]
+        self._active_chat_ids: Set[str] = set()
         self.app = None
         self._is_running = False
 
     def is_configured(self) -> bool:
-        return bool(self.token and self.chat_id)
+        return bool(self.token and (self._configured_chat_ids or self.chat_id))
+
+    def _register_active_chat(self, update: Optional[Update]):
+        """Dynamically register chat ID from user interaction so all active users receive alerts."""
+        if update and update.effective_chat:
+            self._active_chat_ids.add(str(update.effective_chat.id))
+
+    @property
+    def target_chat_ids(self) -> List[str]:
+        """All unique target chat IDs (configured + actively communicating users)."""
+        all_ids = set(self._configured_chat_ids)
+        all_ids.update(self._active_chat_ids)
+        if not all_ids and self.chat_id:
+            all_ids.add(str(self.chat_id).strip())
+        return [cid for cid in all_ids if cid]
 
     async def _error_handler(self, update: object, context: ContextTypes.DEFAULT_TYPE):
         """Handle unexpected telegram polling/network errors gracefully without crashing."""
@@ -186,51 +204,53 @@ class TelegramBotManager:
                 logger.warning(f"Error stopping Telegram Bot: {e}")
 
     async def send_alert(self, message: str, with_keyboard: bool = False):
-        """Send notification message to configured chat_id with retry on timeout and plain-text fallback."""
+        """Send notification message to all target chat IDs with retry on timeout and plain-text fallback."""
         if not self.is_configured() or not self.app:
             logger.info(f"[TELEGRAM LOG ONLY]:\n{message}")
             return
 
-        for attempt in range(1, 4):
-            try:
-                await self.app.bot.send_message(
-                    chat_id=self.chat_id,
-                    text=message,
-                    parse_mode=ParseMode.MARKDOWN,
-                    reply_markup=REPLY_KEYBOARD if with_keyboard else None,
-                    read_timeout=20,
-                    write_timeout=20
-                )
-                return
-            except Exception as e:
-                err_str = str(e).lower()
-                logger.warning(f"Telegram send_alert attempt {attempt}/3: {e}")
+        targets = self.target_chat_ids
+        for target_id in targets:
+            for attempt in range(1, 4):
+                try:
+                    await self.app.bot.send_message(
+                        chat_id=target_id,
+                        text=message,
+                        parse_mode=ParseMode.MARKDOWN,
+                        reply_markup=REPLY_KEYBOARD if with_keyboard else None,
+                        read_timeout=20,
+                        write_timeout=20
+                    )
+                    break
+                except Exception as e:
+                    err_str = str(e).lower()
+                    logger.warning(f"Telegram send_alert to {target_id} attempt {attempt}/3: {e}")
 
-                # Fallback: if Telegram rejects due to markdown entity parsing, send cleanly without formatting
-                if "can't parse" in err_str or "entity" in err_str or "parse" in err_str or "badrequest" in err_str:
-                    try:
-                        clean_text = (
-                            message.replace("*", "")
-                            .replace("`", "")
-                            .replace("_", "")
-                        )
-                        await self.app.bot.send_message(
-                            chat_id=self.chat_id,
-                            text=clean_text,
-                            parse_mode=None,
-                            reply_markup=REPLY_KEYBOARD if with_keyboard else None,
-                            read_timeout=20,
-                            write_timeout=20
-                        )
-                        logger.info("Successfully delivered Telegram alert via plain text fallback.")
-                        return
-                    except Exception as fb_err:
-                        logger.error(f"Plain text fallback also failed: {fb_err}")
+                    # Fallback: if Telegram rejects due to markdown entity parsing, send cleanly without formatting
+                    if "can't parse" in err_str or "entity" in err_str or "parse" in err_str or "badrequest" in err_str:
+                        try:
+                            clean_text = (
+                                message.replace("*", "")
+                                .replace("`", "")
+                                .replace("_", "")
+                            )
+                            await self.app.bot.send_message(
+                                chat_id=target_id,
+                                text=clean_text,
+                                parse_mode=None,
+                                reply_markup=REPLY_KEYBOARD if with_keyboard else None,
+                                read_timeout=20,
+                                write_timeout=20
+                            )
+                            logger.info(f"Successfully delivered alert to {target_id} via plain text fallback.")
+                            break
+                        except Exception as fb_err:
+                            logger.error(f"Plain text fallback to {target_id} also failed: {fb_err}")
 
-                if attempt < 3:
-                    await asyncio.sleep(2)
-                else:
-                    logger.error(f"Failed to send Telegram alert after 3 attempts: {e}")
+                    if attempt < 3:
+                        await asyncio.sleep(2)
+                    else:
+                        logger.error(f"Failed to send Telegram alert to {target_id} after 3 attempts: {e}")
 
     async def send_trade_signal_alert(
         self,
@@ -347,6 +367,7 @@ class TelegramBotManager:
 
     async def _handle_menu_button(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle quick button taps from the persistent ReplyKeyboardMarkup."""
+        self._register_active_chat(update)
         text = update.message.text.strip()
         if "Status" in text:
             await self._cmd_status(update, context)
@@ -375,6 +396,7 @@ class TelegramBotManager:
     # ==========================================
 
     async def _cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        self._register_active_chat(update)
         wib_time = get_wib_str()
         acc = self.mt5.get_account_info()
         mode_str = "⏸️ Jeda (Paused)" if self.trading_state.get("is_paused") else "🟢 Aktif (Active)"
@@ -407,6 +429,7 @@ class TelegramBotManager:
         await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN, reply_markup=REPLY_KEYBOARD)
 
     async def _cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        self._register_active_chat(update)
         wib_time = get_wib_str()
         dd_ok, dd_pct, dd_msg = self.risk_manager.check_daily_drawdown()
         acc = self.mt5.get_account_info()
@@ -750,6 +773,7 @@ class TelegramBotManager:
 
     async def _cmd_radar(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Query real-time market radar status for all monitored instruments."""
+        self._register_active_chat(update)
         if self.radar_provider:
             if asyncio.iscoroutinefunction(self.radar_provider):
                 msg = await self.radar_provider()

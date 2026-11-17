@@ -136,6 +136,14 @@ class RiskManager:
 
         return True, f"Spread OK ({spread} pts)"
 
+    @staticmethod
+    def _clean_symbol(sym: str) -> str:
+        """Strip trailing 'm' suffix if present (e.g., BTCUSDm -> BTCUSD) for clean comparison."""
+        s = str(sym or "").upper().strip()
+        if s.endswith("M") and len(s) in (7, 8):
+            return s[:-1]
+        return s
+
     def get_max_positions_for_symbol(self, symbol: str) -> Tuple[int, str]:
         """
         Dynamically determine maximum allowed open positions for a symbol based on market regime:
@@ -146,9 +154,9 @@ class RiskManager:
         wib = timezone(timedelta(hours=7))
         now_wib = datetime.now(wib)
         weekday = now_wib.weekday()  # 0=Monday ... 5=Saturday, 6=Sunday
-        sym_upper = symbol.upper()
+        sym_clean = self._clean_symbol(symbol)
 
-        if "BTC" in sym_upper or "ETH" in sym_upper or "CRYPTO" in sym_upper:
+        if "BTC" in sym_clean or "ETH" in sym_clean or "CRYPTO" in sym_clean:
             # Weekend (Saturday & Sunday): Forex & Gold closed -> Crypto can take full weekend quota
             if weekday in (5, 6):
                 return self.max_crypto_weekend_positions, f"Mode Akhir Pekan (Maks {self.max_crypto_weekend_positions} Posisi)"
@@ -162,16 +170,17 @@ class RiskManager:
         """Record the exit timestamp of a trade to enforce the re-entry cooldown period."""
         wib = timezone(timedelta(hours=7))
         now_wib = exit_time or datetime.now(wib)
-        self._last_exit_times[symbol.upper()] = now_wib
-        logger.info(f"Cooldown active for {symbol.upper()} until {now_wib + timedelta(minutes=self.symbol_cooldown_minutes)} WIB.")
+        sym_clean = self._clean_symbol(symbol)
+        self._last_exit_times[sym_clean] = now_wib
+        logger.info(f"Cooldown active for {sym_clean} until {now_wib + timedelta(minutes=self.symbol_cooldown_minutes)} WIB.")
 
     def check_symbol_cooldown(self, symbol: str) -> Tuple[bool, str]:
         """Check if a symbol is in the post-exit cooldown window to prevent rapid overtrading/churn."""
         if self.symbol_cooldown_minutes <= 0:
             return True, "Cooldown disabled"
 
-        sym_upper = symbol.upper()
-        last_exit = self._last_exit_times.get(sym_upper)
+        sym_clean = self._clean_symbol(symbol)
+        last_exit = self._last_exit_times.get(sym_clean)
         if not last_exit:
             return True, "No recent exit recorded"
 
@@ -219,8 +228,12 @@ class RiskManager:
             logger.warning(msg)
             return False, msg
 
-        # 6. Positions per symbol check (Dynamic Slot Allocation)
-        symbol_positions = [p for p in all_positions if p["symbol"].upper() == symbol.upper()]
+        # 6. Positions per symbol check (Dynamic Slot Allocation with symbol normalization)
+        sym_clean = self._clean_symbol(symbol)
+        symbol_positions = [
+            p for p in all_positions 
+            if self._clean_symbol(p.get("symbol", "")) == sym_clean
+        ]
         allowed_max, regime_desc = self.get_max_positions_for_symbol(symbol)
         if len(symbol_positions) >= allowed_max:
             msg = f"Max positions for {symbol} reached ({len(symbol_positions)}/{allowed_max}) [{regime_desc}]."
@@ -307,10 +320,11 @@ class RiskManager:
             price_current = float(p.get("price_current") or price_open)
             current_vol = float(p.get("volume") or 0.01)
 
-            # Case-insensitive ATR lookup
+            # Case-insensitive ATR lookup with symbol normalization
+            sym_clean = self._clean_symbol(symbol)
             atr = 0.0
             for k, v in current_atr.items():
-                if k.upper() == symbol.upper():
+                if self._clean_symbol(k) == sym_clean:
                     atr = float(v)
                     break
 
