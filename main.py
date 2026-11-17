@@ -7,7 +7,7 @@ import logging
 import argparse
 import asyncio
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from logging.handlers import RotatingFileHandler
 import psutil
 
@@ -31,7 +31,7 @@ from core.technical_engine import TechnicalEngine
 from core.risk_manager import RiskManager
 from core.news_scraper import NewsScraper
 from core.gemini_analyst import GeminiAnalyst
-from core.database import TradeDatabase, get_wib_str
+from core.database import TradeDatabase, get_wib_str, get_wib_now
 from bot.telegram_bot import TelegramBotManager
 
 
@@ -154,8 +154,11 @@ class TradingBotApp:
         print("=" * 60 + "\n")
 
         # Run an initial evaluation immediately on startup
-        logger.info("Running initial pipeline check on startup...")
-        await self.run_pipeline_cycle()
+        try:
+            logger.info("Running initial pipeline check on startup...")
+            await self.run_pipeline_cycle()
+        except Exception as e:
+            logger.error(f"Error during initial pipeline check on startup: {e}")
 
     async def stop(self):
         """Clean shutdown of all subsystems."""
@@ -171,30 +174,33 @@ class TradingBotApp:
 
     async def run_pipeline_cycle(self):
         """Execute complete M15 decision pipeline across all monitored symbols."""
-        now_str = get_wib_str()
-        self.trading_state["last_check_time"] = now_str
-        logger.info(f"========== [PIPELINE CYCLE STARTED: {now_str}] ==========")
+        try:
+            now_str = get_wib_str()
+            self.trading_state["last_check_time"] = now_str
+            logger.info(f"========== [PIPELINE CYCLE STARTED: {now_str}] ==========")
 
-        # Step 1: Check Pause state
-        if self.trading_state["is_paused"]:
-            logger.info("Auto-trading is PAUSED. Skipping trade execution.")
-            return
+            # Step 1: Check Pause state
+            if self.trading_state["is_paused"]:
+                logger.info("Auto-trading is PAUSED. Skipping trade execution.")
+                return
 
-        # Step 2: Check Daily Drawdown
-        dd_ok, dd_pct, dd_msg = self.risk_manager.check_daily_drawdown()
-        if not dd_ok:
-            logger.warning(f"Pipeline skipped: {dd_msg}")
-            await self.telegram.send_alert(f"⚠️ *Trading Halted:* {dd_msg}")
-            return
+            # Step 2: Check Daily Drawdown
+            dd_ok, dd_pct, dd_msg = self.risk_manager.check_daily_drawdown()
+            if not dd_ok:
+                logger.warning(f"Pipeline skipped: {dd_msg}")
+                await self.telegram.send_alert(f"⚠️ *Trading Halted:* {dd_msg}")
+                return
 
-        # Step 3: Iterate through symbols
-        for symbol in settings.SYMBOLS:
-            await self._process_symbol(symbol)
+            # Step 3: Iterate through symbols
+            for symbol in settings.SYMBOLS:
+                await self._process_symbol(symbol)
 
-        logger.info(f"========== [PIPELINE CYCLE FINISHED] ==========\n")
+            logger.info(f"========== [PIPELINE CYCLE FINISHED] ==========\n")
 
-        # Step 4: Periodic Scan Report to Telegram (Heartbeat)
-        await self._check_and_send_periodic_report()
+            # Step 4: Periodic Scan Report to Telegram (Heartbeat)
+            await self._check_and_send_periodic_report()
+        except Exception as e:
+            logger.error(f"Error during pipeline cycle execution: {e}")
 
     async def _check_and_send_periodic_report(self):
         """Send periodic scan summary to Telegram based on configured frequency ('1h', '15m', or 'off')."""
@@ -202,7 +208,7 @@ class TradingBotApp:
         if mode == "off":
             return
 
-        now_wib = datetime.now(timezone(timedelta(hours=7)))
+        now_wib = get_wib_now()
         should_send = False
 
         if mode == "15m":
