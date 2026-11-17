@@ -656,35 +656,111 @@ class ExnessApiConnector:
     def get_closed_deal_info(self, ticket: int) -> Optional[Dict[str, Any]]:
         """
         Query deal history to determine exit price, realized profit, and exit reason.
-        Endpoint: GET /v1/history/accounts/{account_id}/deals
+        Endpoint: GET /v1/history/accounts/{account_id}/deals?from={from}&to={to}
         """
-        path = f"/v1/history/accounts/{self.account_id}/deals?position_id={ticket}"
+        now = datetime.now(timezone.utc)
+        from_t = (now - timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        to_t = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+        path = f"/v1/history/accounts/{self.account_id}/deals?from={from_t}&to={to_t}"
         ok, data = self._request("GET", path, use_access_point=True)
-        if not ok or "deals" not in data:
+        if not ok or "items" not in data:
             return None
 
-        deals = data["deals"]
-        if not deals:
+        matching_deals = []
+        for item in data.get("items", []):
+            d = item.get("deal", {})
+            if str(d.get("position_id")) == str(ticket):
+                matching_deals.append(d)
+
+        if not matching_deals:
             return None
 
-        out_deals = [d for d in deals if d.get("entry") in ("out", "close", "DEAL_ENTRY_OUT")]
-        if not out_deals:
-            out_deals = deals[-1:]
+        close_deals = [d for d in matching_deals if d.get("type") in ("close", "out", "DEAL_ENTRY_OUT")]
+        if not close_deals:
+            close_deals = matching_deals[-1:]
 
-        total_profit = sum(float(d.get("profit", 0.0)) for d in out_deals)
-        final_deal = out_deals[-1]
+        final_deal = close_deals[-1]
         exit_price = float(final_deal.get("price", 0.0))
+        profit_obj = final_deal.get("profit", {})
+        if isinstance(profit_obj, dict):
+            profit_amount = float(profit_obj.get("amount", 0.0))
+        else:
+            profit_amount = float(profit_obj or 0.0)
 
-        if abs(total_profit) <= 0.05:
+        if abs(profit_amount) <= 0.05:
             reason_str = "BREAK_EVEN"
-        elif total_profit > 0.05:
+        elif profit_amount > 0.05:
             reason_str = "TAKE_PROFIT"
         else:
             reason_str = "STOP_LOSS"
 
         return {
             "price": exit_price,
-            "profit": round(total_profit, 2),
+            "profit": round(profit_amount, 2),
             "reason": reason_str,
-            "time": final_deal.get("time", "")
+            "time": final_deal.get("create_time", "")
         }
+
+    def get_recent_closed_positions(self, days_back: int = 2) -> List[Dict[str, Any]]:
+        """
+        Fetch all positions closed within the given time window from Exness deal history.
+        Compliant with dual-check closed positions tracker.
+        """
+        now = datetime.now(timezone.utc)
+        from_t = (now - timedelta(days=days_back)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        to_t = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+        path = f"/v1/history/accounts/{self.account_id}/deals?from={from_t}&to={to_t}"
+        ok, data = self._request("GET", path, use_access_point=True)
+        if not ok or "items" not in data:
+            return []
+
+        pos_map: Dict[str, Dict[str, Any]] = {}
+        for item in data.get("items", []):
+            d = item.get("deal", {})
+            pos_id = str(d.get("position_id") or "")
+            if not pos_id:
+                continue
+            if pos_id not in pos_map:
+                pos_map[pos_id] = {"open": None, "close": None}
+            if d.get("type") == "open":
+                pos_map[pos_id]["open"] = d
+            elif d.get("type") == "close":
+                pos_map[pos_id]["close"] = d
+
+        closed_list = []
+        for pos_id, pdata in pos_map.items():
+            if pdata["close"]:
+                c = pdata["close"]
+                o = pdata["open"]
+                p_obj = c.get("profit", {})
+                pnl = float(p_obj.get("amount", 0.0)) if isinstance(p_obj, dict) else float(p_obj or 0.0)
+                open_p = float(o.get("price", 0.0)) if o else float(c.get("price", 0.0))
+                close_p = float(c.get("price", 0.0))
+                vol = float(c.get("volume", 0.01))
+                inst = c.get("instrument", "")
+                direction = o.get("direction", "buy").upper() if o else ("SELL" if c.get("direction") == "buy" else "BUY")
+
+                if abs(pnl) <= 0.05:
+                    reason_str = "BREAK_EVEN"
+                elif pnl > 0.05:
+                    reason_str = "TAKE_PROFIT"
+                else:
+                    reason_str = "STOP_LOSS"
+
+                open_time = o.get("create_time", "") if o else ""
+                close_time = c.get("create_time", "")
+
+                closed_list.append({
+                    "ticket": int(pos_id),
+                    "symbol": inst,
+                    "action": direction,
+                    "lot": vol,
+                    "entry_price": open_p,
+                    "close_price": close_p,
+                    "profit": round(pnl, 2),
+                    "reason": reason_str,
+                    "entry_time": open_time,
+                    "close_time": close_time
+                })
+
+        return closed_list

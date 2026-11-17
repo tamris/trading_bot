@@ -444,48 +444,102 @@ class TradingBotApp:
                         msg = f"🛡️ *Break-Even Aktif (WIB):* Stop Loss dipindahkan ke harga Entry (`{entry_p}`) untuk Tiket `#{t}`."
                         await self.telegram.send_alert(msg)
 
-            # 3. Detect Closed Trades in SQLite (TP, SL, Manual Close)
+            # 3. Synchronize any active broker positions into SQLite if missing
+            current_mt5_positions = self.mt5.get_open_positions()
+            active_tickets = {p["ticket"] for p in current_mt5_positions}
+
+            for p in current_mt5_positions:
+                t = p["ticket"]
+                existing = self.db.get_trade_by_ticket(t)
+                if not existing:
+                    self.db.record_entry(
+                        ticket=t,
+                        symbol=p["symbol"],
+                        action=p["type"],
+                        lot=p["volume"],
+                        entry_price=p["price_open"],
+                        sl_price=p["sl"],
+                        tp_price=p["tp"],
+                        confluence_score=85,
+                        ai_reasoning="Active position synced from broker"
+                    )
+
+            # 4. Check for closed trades from SQLite tracked trades
             open_db_trades = self.db.get_open_trades()
-            if open_db_trades:
-                current_mt5_positions = self.mt5.get_open_positions()
-                active_tickets = {p["ticket"] for p in current_mt5_positions}
+            for trade in open_db_trades:
+                ticket = trade["ticket"]
+                if ticket not in active_tickets:
+                    # Position is no longer in open list -> It closed!
+                    deal_info = self.mt5.get_closed_deal_info(ticket)
+                    if deal_info:
+                        close_price = deal_info["price"]
+                        pnl = deal_info["profit"]
+                        reason = deal_info["reason"]
+                    else:
+                        close_price = trade["tp_price"]
+                        pnl = 0.0
+                        reason = "CLOSED"
 
-                for trade in open_db_trades:
-                    ticket = trade["ticket"]
-                    if ticket not in active_tickets:
-                        # Position is no longer in open MT5 list -> It closed!
-                        deal_info = self.mt5.get_closed_deal_info(ticket)
-                        if deal_info:
-                            close_price = deal_info["price"]
-                            pnl = deal_info["profit"]
-                            reason = deal_info["reason"]
-                        else:
-                            # Fallback if deal history is pending
-                            close_price = trade["tp_price"]
-                            pnl = 0.0
-                            reason = "CLOSED"
+                    close_time_wib = get_wib_str()
+                    self.db.record_close(
+                        ticket=ticket,
+                        close_price=close_price,
+                        profit_loss=pnl,
+                        close_reason=reason
+                    )
+                    self.risk_manager.record_symbol_exit(trade["symbol"])
 
+                    await self.telegram.send_trade_close_alert(
+                        ticket=ticket,
+                        symbol=trade["symbol"],
+                        action=trade["action"],
+                        lot_size=trade["lot"],
+                        entry_price=trade["entry_price"],
+                        close_price=close_price,
+                        pnl=pnl,
+                        reason=reason,
+                        entry_time=trade["entry_time"],
+                        close_time=close_time_wib
+                    )
+
+            # 5. Dual-Protection: Query recent closed positions directly from broker history
+            if hasattr(self.mt5, "get_recent_closed_positions"):
+                recent_closed = self.mt5.get_recent_closed_positions(days_back=2)
+                for rc in recent_closed:
+                    t = rc["ticket"]
+                    if not self.db.is_trade_closed(t):
                         close_time_wib = get_wib_str()
-                        self.db.record_close(
-                            ticket=ticket,
-                            close_price=close_price,
-                            profit_loss=pnl,
-                            close_reason=reason
-                        )
+                        if not self.db.get_trade_by_ticket(t):
+                            self.db.record_entry(
+                                ticket=t,
+                                symbol=rc["symbol"],
+                                action=rc["action"],
+                                lot=rc["lot"],
+                                entry_price=rc["entry_price"],
+                                sl_price=0.0,
+                                tp_price=rc["close_price"],
+                                confluence_score=85,
+                                ai_reasoning="Broker history closed trade sync"
+                            )
 
-                        # Trigger post-exit cooldown for this symbol to prevent churn
-                        self.risk_manager.record_symbol_exit(trade["symbol"])
+                        self.db.record_close(
+                            ticket=t,
+                            close_price=rc["close_price"],
+                            profit_loss=rc["profit"],
+                            close_reason=rc["reason"]
+                        )
+                        self.risk_manager.record_symbol_exit(rc["symbol"])
 
                         await self.telegram.send_trade_close_alert(
-                            ticket=ticket,
-                            symbol=trade["symbol"],
-                            action=trade["action"],
-                            lot_size=trade["lot"],
-                            entry_price=trade["entry_price"],
-                            close_price=close_price,
-                            pnl=pnl,
-                            reason=reason,
-                            entry_time=trade["entry_time"],
+                            ticket=t,
+                            symbol=rc["symbol"],
+                            action=rc["action"],
+                            lot_size=rc["lot"],
+                            entry_price=rc["entry_price"],
+                            close_price=rc["close_price"],
+                            pnl=rc["profit"],
+                            reason=rc["reason"],
+                            entry_time=rc.get("entry_time") or close_time_wib,
                             close_time=close_time_wib
                         )
         except Exception as e:

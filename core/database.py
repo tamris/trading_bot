@@ -201,6 +201,11 @@ class TradeDatabase:
             row = cursor.fetchone()
             return dict(row) if row else None
 
+    def is_trade_closed(self, ticket: int) -> bool:
+        """Check if a trade exists in database and is already marked CLOSED."""
+        trade = self.get_trade_by_ticket(ticket)
+        return bool(trade and trade.get("status") == "CLOSED")
+
     def get_summary_stats(self) -> Dict[str, Any]:
         """Compute aggregated trading statistics distinguishing Wins, BEP (Zero Loss), and Losses."""
         with self._get_connection() as conn:
