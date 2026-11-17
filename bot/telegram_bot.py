@@ -326,7 +326,7 @@ class TelegramBotManager:
                 f"• *Skor Konfluensi:* `{confluence_score}/100`\n"
                 f"• *Waktu Entry:* `{wib_time}`\n"
                 f"• *Status Broker:* {order_status}\n\n"
-                f"🧠 *Analisa AI:*\n_{clean_reasoning}_\n"
+                f"🧠 *Analisa AI:*\n{clean_reasoning}\n"
             )
             return await self.send_alert(msg, with_keyboard=True)
         except Exception as e:
@@ -980,7 +980,7 @@ class TelegramBotManager:
             f"• *Status Eksekusi:* DIBATALKAN ❌\n"
             f"• *Skor Keyakinan AI:* `{score} / 100` *(Syarat minimal {min_score})*\n"
             f"• *Sentimen Berita:* `{sentiment}`\n"
-            f"• *Alasan Penolakan AI:*\n_{clean_reasoning}_\n\n"
+            f"• *Alasan Penolakan AI:*\n{clean_reasoning}\n\n"
             f"• *Waktu Analisa:* `{now_wib}`\n"
             f"💡 _Bot mencegah entry karena konfluensi berita & sentimen tidak mendukung setup teknikal._"
         )
