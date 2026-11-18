@@ -157,6 +157,7 @@ class TelegramBotManager:
                 self.app.add_handler(CommandHandler("resume", self._cmd_resume))
                 self.app.add_handler(CommandHandler("closeall", self._cmd_closeall))
                 self.app.add_handler(CommandHandler("resetdb", self._cmd_resetdb))
+                self.app.add_handler(CommandHandler("resetdd", self._cmd_resetdd))
                 self.app.add_handler(CommandHandler("help", self._cmd_help))
 
                 # Register quick keyboard menu button clicks
@@ -178,6 +179,7 @@ class TelegramBotManager:
                         BotCommand("resume", "▶️ Lanjutkan Auto-Trade"),
                         BotCommand("closeall", "🚨 Tutup Darurat Semua Posisi"),
                         BotCommand("resetdb", "🧹 Bersihkan Riwayat (Simpan Open)"),
+                        BotCommand("resetdd", "🔄 Reset Drawdown (Pasca WD/Deposit)"),
                         BotCommand("help", "ℹ️ Bantuan & Panduan Menu")
                     ])
                 except Exception as e:
@@ -928,6 +930,24 @@ class TelegramBotManager:
             f"• *Posisi Aktif (OPEN) Tetap Disimpan:* `{len(open_trades)}` posisi\n\n"
             f"*Posisi Berjalan Saat Ini:*\n{open_info}\n"
             "Status database kini bersih dan siap mencatat transaksi berikutnya."
+        )
+        await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=REPLY_KEYBOARD)
+
+    async def _cmd_resetdd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Reset Daily Drawdown baseline to current balance/equity after deposit or withdrawal."""
+        self._register_active_chat(update)
+        acc = self.mt5.get_account_info()
+        cur_bal = float(acc.get("balance", 0.0))
+        cur_eq = float(acc.get("equity", cur_bal))
+        new_base = self.risk_manager.reset_drawdown(cur_eq)
+
+        msg = (
+            "🔄 *DAILY DRAWDOWN BERHASIL DIRESET (WIB)*\n\n"
+            f"• *Acuan Saldo Harian Baru:* `${new_base:.2f}`\n"
+            f"• *Equity Saat Ini:* `${cur_eq:.2f}`\n"
+            "• *Status Resiko:* 🟢 Aman (Normal)\n"
+            "• *Auto-Trading:* 🟢 Aktif Siap Eksekusi\n\n"
+            "💡 _Acuan drawdown harian kini disinkronkan dengan saldo setelah WD/Deposit._"
         )
         await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=REPLY_KEYBOARD)
 

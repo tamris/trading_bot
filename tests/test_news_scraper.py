@@ -5,6 +5,7 @@ from core.news_scraper import NewsScraper
 
 def test_news_blackout_detection():
     ns = NewsScraper()
+    ns._last_calendar_fetch = datetime.now(timezone.utc)
     event_time = datetime(2026, 11, 14, 15, 0, 0, tzinfo=timezone.utc)
     ns._cached_events = [
         {

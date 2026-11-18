@@ -98,9 +98,9 @@ class TradingBotApp:
             logger.info("Using MetaTrader 5 Desktop Backend (Windows)...")
             self.mt5 = MT5Connector(mock_mode=self.mock_mode)
         self.technical_engine = TechnicalEngine()
-        self.risk_manager = RiskManager(self.mt5)
         self.news_scraper = NewsScraper()
         self.db = TradeDatabase()
+        self.risk_manager = RiskManager(self.mt5, db=self.db)
         self.gemini_analyst = GeminiAnalyst(db=self.db)
         self.telegram = TelegramBotManager(
             self.mt5,

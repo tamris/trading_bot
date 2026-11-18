@@ -352,6 +352,24 @@ class TradeDatabase:
                 "open_trades": open_cnt
             }
 
+    def get_today_pnl(self, date_prefix: Optional[str] = None) -> float:
+        """Calculate sum of closed trade PnL for today (WIB date string, e.g. '2026-11-18')."""
+        if not date_prefix:
+            date_prefix = get_wib_now().strftime("%Y-%m-%d")
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT SUM(profit_loss) as today_pnl 
+                    FROM trades 
+                    WHERE status = 'CLOSED' AND close_time LIKE ?
+                """, (f"{date_prefix}%",))
+                row = cursor.fetchone()
+                return float(row["today_pnl"] or 0.0) if row else 0.0
+        except Exception as e:
+            logger.error(f"[DB] Error getting today PnL: {e}")
+            return 0.0
+
     def set_metadata(self, key: str, value: str):
         """Store key-value metadata in SQLite."""
         try:
