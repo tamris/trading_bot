@@ -19,6 +19,7 @@ if project_root not in sys.path:
 
 import logging
 import asyncio
+from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, BotCommand
 from telegram.constants import ParseMode
@@ -610,8 +611,33 @@ class TelegramBotManager:
         if hasattr(self.mt5, "get_recent_closed_positions"):
             try:
                 recent_closed = self.mt5.get_recent_closed_positions(days_back=7)
+                last_reset_str = self.db.get_last_reset_time()
+                last_reset_dt = None
+                if last_reset_str:
+                    try:
+                        last_reset_dt = datetime.fromisoformat(last_reset_str)
+                        if last_reset_dt.tzinfo is None:
+                            last_reset_dt = last_reset_dt.replace(tzinfo=timezone.utc)
+                    except Exception:
+                        pass
+
                 for rc in recent_closed:
                     t = rc["ticket"]
+                    raw_close_time = rc.get("close_time", "")
+                    close_dt = None
+                    if raw_close_time:
+                        try:
+                            clean_time = str(raw_close_time).replace("Z", "+00:00")
+                            close_dt = datetime.fromisoformat(clean_time)
+                            if close_dt.tzinfo is None:
+                                close_dt = close_dt.replace(tzinfo=timezone.utc)
+                        except Exception:
+                            pass
+
+                    # If this trade closed before or at last /resetdb, DO NOT re-insert into DB
+                    if last_reset_dt and close_dt and close_dt <= last_reset_dt:
+                        continue
+
                     if not self.db.is_trade_closed(t):
                         if not self.db.get_trade_by_ticket(t):
                             self.db.record_entry(
@@ -630,7 +656,8 @@ class TelegramBotManager:
                             ticket=t,
                             close_price=rc["close_price"],
                             profit_loss=rc["profit"],
-                            close_reason=rc["reason"]
+                            close_reason=rc["reason"],
+                            close_alert_sent=1
                         )
             except Exception as sync_e:
                 logger.warning(f"Error syncing history from broker in _cmd_history: {sync_e}")

@@ -107,6 +107,14 @@ class TradeDatabase:
                     last_used_at TEXT
                 )
             """)
+            # Table for persistent bot metadata (e.g. reset timestamps)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS bot_metadata (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                )
+            """)
+
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_key_status ON api_keys(status)")
             conn.commit()
 
@@ -344,16 +352,50 @@ class TradeDatabase:
                 "open_trades": open_cnt
             }
 
+    def set_metadata(self, key: str, value: str):
+        """Store key-value metadata in SQLite."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    INSERT INTO bot_metadata (key, value) VALUES (?, ?)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """, (str(key), str(value)))
+                conn.commit()
+        except Exception as e:
+            logger.error(f"[DB] Error setting metadata {key}: {e}")
+
+    def get_metadata(self, key: str, default: Optional[str] = None) -> Optional[str]:
+        """Fetch metadata value by key."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT value FROM bot_metadata WHERE key = ?", (str(key),))
+                row = cursor.fetchone()
+                return str(row["value"]) if row else default
+        except Exception as e:
+            logger.error(f"[DB] Error fetching metadata {key}: {e}")
+            return default
+
+    def get_last_reset_time(self) -> Optional[str]:
+        """Get the ISO timestamp of the last history reset."""
+        return self.get_metadata("last_reset_time", None)
+
     def reset_closed_trades(self) -> int:
         """
         Delete all CLOSED/historical trades from the database,
-        preserving all currently OPEN positions intact.
+        preserving all currently OPEN positions intact, and mark reset timestamp.
         """
         try:
+            now_iso = datetime.now(timezone.utc).isoformat()
             with self._get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute("DELETE FROM trades WHERE status != 'OPEN'")
                 deleted_count = cursor.rowcount
+                cursor.execute("""
+                    INSERT INTO bot_metadata (key, value) VALUES ('last_reset_time', ?)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """, (now_iso,))
                 conn.commit()
             
             # Run VACUUM outside transaction
@@ -362,7 +404,7 @@ class TradeDatabase:
             conn.execute("VACUUM")
             conn.close()
 
-            logger.info(f"[DB] Reset complete: deleted {deleted_count} closed trades. Preserved all OPEN positions.")
+            logger.info(f"[DB] Reset complete: deleted {deleted_count} closed trades at {now_iso}. Preserved OPEN positions.")
             return deleted_count
         except Exception as e:
             logger.error(f"[DB] Error resetting closed trades: {e}")

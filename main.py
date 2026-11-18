@@ -595,8 +595,34 @@ class TradingBotApp:
             # 5. Dual-Protection: Query recent closed positions directly from broker history
             if hasattr(self.mt5, "get_recent_closed_positions"):
                 recent_closed = self.mt5.get_recent_closed_positions(days_back=2)
+                last_reset_str = self.db.get_last_reset_time()
+                last_reset_dt = None
+                if last_reset_str:
+                    try:
+                        last_reset_dt = datetime.fromisoformat(last_reset_str)
+                        if last_reset_dt.tzinfo is None:
+                            last_reset_dt = last_reset_dt.replace(tzinfo=timezone.utc)
+                    except Exception:
+                        pass
+                now_utc = datetime.now(timezone.utc)
+
                 for rc in recent_closed:
                     t = rc["ticket"]
+                    raw_close_time = rc.get("close_time", "")
+                    close_dt = None
+                    if raw_close_time:
+                        try:
+                            clean_time = str(raw_close_time).replace("Z", "+00:00")
+                            close_dt = datetime.fromisoformat(clean_time)
+                            if close_dt.tzinfo is None:
+                                close_dt = close_dt.replace(tzinfo=timezone.utc)
+                        except Exception:
+                            pass
+
+                    # If this trade closed before or at the user's /resetdb, completely ignore it
+                    if last_reset_dt and close_dt and close_dt <= last_reset_dt:
+                        continue
+
                     if not self.db.is_close_alert_sent(t):
                         close_time_wib = get_wib_str()
                         if not self.db.get_trade_by_ticket(t):
@@ -618,27 +644,36 @@ class TradingBotApp:
                             close_price=rc["close_price"],
                             profit_loss=rc["profit"],
                             close_reason=rc["reason"],
-                            close_alert_sent=0
+                            close_alert_sent=1
                         )
                         self.risk_manager.record_symbol_exit(rc["symbol"])
 
-                        try:
-                            sent_ok = await self.telegram.send_trade_close_alert(
-                                ticket=t,
-                                symbol=rc["symbol"],
-                                action=rc["action"],
-                                lot_size=rc["lot"],
-                                entry_price=rc["entry_price"],
-                                close_price=rc["close_price"],
-                                pnl=rc["profit"],
-                                reason=rc["reason"],
-                                entry_time=rc.get("entry_time") or close_time_wib,
-                                close_time=rc.get("close_time") or close_time_wib
-                            )
-                            if sent_ok:
-                                self.db.mark_close_alert_sent(t)
-                        except Exception as e:
-                            logger.error(f"Error sending broker history close alert for #{t}: {e}")
+                        # CRITICAL: ONLY send alert if the trade closed within the last 10 minutes (600s)
+                        # Prevents old trades from spamming Telegram after restart or reset
+                        is_very_recent = False
+                        if close_dt:
+                            age_seconds = (now_utc - close_dt).total_seconds()
+                            if 0 <= age_seconds <= 600:
+                                is_very_recent = True
+
+                        if is_very_recent:
+                            try:
+                                sent_ok = await self.telegram.send_trade_close_alert(
+                                    ticket=t,
+                                    symbol=rc["symbol"],
+                                    action=rc["action"],
+                                    lot_size=rc["lot"],
+                                    entry_price=rc["entry_price"],
+                                    close_price=rc["close_price"],
+                                    pnl=rc["profit"],
+                                    reason=rc["reason"],
+                                    entry_time=rc.get("entry_time") or close_time_wib,
+                                    close_time=rc.get("close_time") or close_time_wib
+                                )
+                                if sent_ok:
+                                    self.db.mark_close_alert_sent(t)
+                            except Exception as e:
+                                logger.error(f"Error sending broker history close alert for #{t}: {e}")
         except Exception as e:
             logger.error(f"Error in monitor_breakeven: {e}")
 
