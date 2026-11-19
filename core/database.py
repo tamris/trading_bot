@@ -27,6 +27,53 @@ def get_wib_str(dt: Optional[datetime] = None) -> str:
     return dt.strftime("%Y-%m-%d %H:%M:%S WIB")
 
 
+def parse_any_time(value: Any) -> Optional[datetime]:
+    """
+    Parse broker/DB timestamps into an aware WIB datetime.
+    Accepts: datetime, unix epoch (int/float), ISO-8601 UTC ('2026-11-19T06:45:36Z'),
+    and DB strings ('2026-11-19 13:45:36 WIB').
+    """
+    if value is None or value == "":
+        return None
+    try:
+        if isinstance(value, datetime):
+            dt = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+            return dt.astimezone(WIB)
+        if isinstance(value, (int, float)):
+            ts = float(value)
+            if ts > 1e12:  # milliseconds
+                ts /= 1000.0
+            return datetime.fromtimestamp(ts, tz=timezone.utc).astimezone(WIB)
+        s = str(value).strip()
+        if s.endswith("WIB"):
+            return datetime.strptime(s.replace("WIB", "").strip()[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=WIB)
+        s = s.replace("Z", "+00:00")
+        # Trim sub-second precision beyond microseconds (e.g. nanoseconds from APIs)
+        if "." in s:
+            head, tail = s.split(".", 1)
+            frac = ""
+            rest = ""
+            for i, ch in enumerate(tail):
+                if ch.isdigit():
+                    frac += ch
+                else:
+                    rest = tail[i:]
+                    break
+            s = f"{head}.{frac[:6]}{rest}" if frac else f"{head}{rest}"
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(WIB)
+    except Exception:
+        return None
+
+
+def to_wib_str(value: Any) -> str:
+    """Convert any supported timestamp into the canonical 'YYYY-MM-DD HH:MM:SS WIB' DB format."""
+    dt = parse_any_time(value)
+    return get_wib_str(dt) if dt else get_wib_str()
+
+
 class TradeDatabase:
     """Manages SQLite storage for trade orders, execution records, and close events."""
 
@@ -194,10 +241,11 @@ class TradeDatabase:
         tp_price: float,
         confluence_score: int = 0,
         ai_reasoning: str = "",
-        entry_alert_sent: int = 0
+        entry_alert_sent: int = 0,
+        entry_time: Optional[Any] = None
     ) -> bool:
         """Insert a newly executed trade with OPEN status."""
-        entry_time_str = get_wib_str()
+        entry_time_str = to_wib_str(entry_time) if entry_time else get_wib_str()
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
@@ -225,10 +273,11 @@ class TradeDatabase:
         close_price: float,
         profit_loss: float,
         close_reason: str = "MANUAL_CLOSE",
-        close_alert_sent: Optional[int] = None
+        close_alert_sent: Optional[int] = None,
+        close_time: Optional[Any] = None
     ) -> bool:
         """Update an existing trade with exit details and set status to CLOSED."""
-        close_time_str = get_wib_str()
+        close_time_str = to_wib_str(close_time) if close_time else get_wib_str()
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()

@@ -44,6 +44,8 @@ from config.settings import settings
 from core.mt5_connector import MT5Connector
 from core.risk_manager import RiskManager
 from core.database import TradeDatabase, get_wib_str, get_wib_now
+from core.journal import TradingJournal, export_journal_excel, shift_month, MONTHS_ID
+from core.journal_render import render_dashboard, render_calendar, render_trade_log, money
 
 logger = logging.getLogger("ai_trading_bot.telegram")
 
@@ -51,7 +53,8 @@ logger = logging.getLogger("ai_trading_bot.telegram")
 REPLY_KEYBOARD = ReplyKeyboardMarkup(
     [
         [KeyboardButton("📊 Status Akun"), KeyboardButton("📜 Riwayat Trade")],
-        [KeyboardButton("📔 Jurnal Trading"), KeyboardButton("📥 Export CSV")],
+        [KeyboardButton("📔 Jurnal Trading"), KeyboardButton("📅 Kalender PnL")],
+        [KeyboardButton("📊 Chart Performa"), KeyboardButton("📥 Export Excel")],
         [KeyboardButton("🔍 Radar Pasar"), KeyboardButton("🕒 Sesi Pasar")],
         [KeyboardButton("⏸️ Pause Bot"), KeyboardButton("▶️ Resume Bot")],
         [KeyboardButton("🚨 Tutup Semua (Panic)")]
@@ -157,7 +160,14 @@ class TelegramBotManager:
                 self.app.add_handler(CommandHandler("status", self._cmd_status))
                 self.app.add_handler(CommandHandler("journal", self._cmd_journal))
                 self.app.add_handler(CommandHandler("jurnal", self._cmd_journal))
-                self.app.add_handler(CommandHandler("export", self._cmd_export))
+                self.app.add_handler(CommandHandler("calendar", self._cmd_calendar))
+                self.app.add_handler(CommandHandler("kalender", self._cmd_calendar))
+                self.app.add_handler(CommandHandler("chart", self._cmd_chart))
+                self.app.add_handler(CommandHandler("dashboard", self._cmd_chart))
+                self.app.add_handler(CommandHandler("tradelog", self._cmd_tradelog))
+                self.app.add_handler(CommandHandler("excel", self._cmd_export_excel))
+                self.app.add_handler(CommandHandler("export", self._cmd_export_excel))
+                self.app.add_handler(CommandHandler("csv", self._cmd_export_csv))
                 self.app.add_handler(CommandHandler("eval", self._cmd_eval))
                 self.app.add_handler(CommandHandler("evaluasi", self._cmd_eval))
                 self.app.add_handler(CommandHandler("history", self._cmd_history))
@@ -176,7 +186,7 @@ class TelegramBotManager:
                 self.app.add_handler(CommandHandler("help", self._cmd_help))
 
                 # Register inline button callbacks
-                self.app.add_handler(CallbackQueryHandler(self._handle_journal_callback, pattern="^journal_"))
+                self.app.add_handler(CallbackQueryHandler(self._handle_journal_callback, pattern=r"^(journal_|cal_)"))
 
                 # Register quick keyboard menu button clicks
                 self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_menu_button))
@@ -188,20 +198,19 @@ class TelegramBotManager:
                 try:
                     await self.app.bot.set_my_commands([
                         BotCommand("status", "📊 Status Saldo & Posisi Aktif"),
-                        BotCommand("journal", "📔 Jurnal Trading & Metrik Lengkap"),
-                        BotCommand("export", "📥 Download File CSV Jurnal"),
+                        BotCommand("journal", "📔 Jurnal & Visual Dashboard"),
+                        BotCommand("calendar", "📅 Kalender PnL Harian"),
+                        BotCommand("chart", "📈 Equity Curve & Chart Performa"),
+                        BotCommand("excel", "📊 Download Excel (.xlsx) Lengkap"),
                         BotCommand("eval", "🧠 Evaluasi Jurnal oleh Gemini AI"),
-                        BotCommand("history", "📜 Riwayat Trade (Entry -> Close)"),
+                        BotCommand("history", "📜 Riwayat 5 Trade Terakhir"),
                         BotCommand("radar", "🔍 Radar Pasar (Alasan Belum Entry)"),
-                        BotCommand("report", "⏱️ Atur Notif Radar: /report 1h, 15m, off"),
                         BotCommand("sesi", "🕒 Status Sesi Pasar & Pair Aktif"),
-                        BotCommand("keys", "🔑 Cek Pool API Key (SQLite DB)"),
                         BotCommand("pause", "⏸️ Jeda Auto-Trade"),
                         BotCommand("resume", "▶️ Lanjutkan Auto-Trade"),
                         BotCommand("closeall", "🚨 Tutup Darurat Semua Posisi"),
-                        BotCommand("resetdb", "🧹 Bersihkan Riwayat (Simpan Open)"),
                         BotCommand("resetdd", "🔄 Reset Drawdown (Pasca WD/Deposit)"),
-                        BotCommand("help", "ℹ️ Bantuan & Panduan Menu")
+                        BotCommand("help", "ℹ️ Panduan Menu & Fitur")
                     ])
                 except Exception as e:
                     logger.warning(f"Could not set Telegram menu commands: {e}")
@@ -461,8 +470,12 @@ class TelegramBotManager:
             await self._cmd_status(update, context)
         elif "Jurnal" in text or "Journal" in text:
             await self._cmd_journal(update, context)
-        elif "Export" in text or "CSV" in text:
-            await self._cmd_export(update, context)
+        elif "Kalender" in text or "Calendar" in text:
+            await self._cmd_calendar(update, context)
+        elif "Chart" in text or "Dashboard" in text:
+            await self._cmd_chart(update, context)
+        elif "Excel" in text or "Export" in text or "CSV" in text:
+            await self._cmd_export_excel(update, context)
         elif "Riwayat" in text or "History" in text:
             await self._cmd_history(update, context)
         elif "Radar" in text:
@@ -508,8 +521,10 @@ class TelegramBotManager:
         help_text = (
             "ℹ️ *Panduan Perintah Bot Trading:*\n\n"
             "• `/status` atau tombol *📊 Status Akun* - Cek saldo, equity, posisi yang sedang terbuka & drawdown.\n"
-            "• `/journal` atau tombol *📔 Jurnal Trading* - Jurnal komprehensif, Win Rate, Profit Factor, R:R & breakdown pair.\n"
-            "• `/export` atau tombol *📥 Export CSV* - Download file spreadsheet jurnal lengkap ke Telegram.\n"
+            "• `/journal` atau tombol *📔 Jurnal Trading* - Dashboard visual analitik performa lengkap.\n"
+            "• `/calendar` atau tombol *📅 Kalender PnL* - Kalender visual PnL harian (kotak hijau/merah per hari & mingguan).\n"
+            "• `/chart` atau tombol *📊 Chart Performa* - Grafik kurva ekuitas, drawdown, bar harian & komposisi hasil.\n"
+            "• `/excel` atau tombol *📥 Export Excel* - Download file Excel (.xlsx) rapi lengkap 3 sheet (KPI, Kalender, Log Trade).\n"
             "• `/eval` - Evaluasi mendalam jurnal & kinerja trading oleh Gemini AI.\n"
             "• `/history` atau tombol *📜 Riwayat Trade* - Lihat daftar 5 riwayat trade terakhir (SQLite).\n"
             "• `/sesi` atau tombol *🕒 Sesi Pasar* - Cek sesi pasar aktif saat ini & status izin tiap pair (WIB).\n"
@@ -788,104 +803,205 @@ class TelegramBotManager:
             await update.message.reply_text(clean_text, parse_mode=None, reply_markup=REPLY_KEYBOARD)
 
     async def _cmd_journal(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Display comprehensive interactive Trading Journal with performance analytics."""
+        """Display visual performance dashboard + interactive buttons."""
         self._register_active_chat(update)
         self._sync_broker_data()
 
-        metrics = self.db.get_detailed_journal_metrics()
-        recent_trades = self.db.get_all_journal_trades(limit=5)
+        journal = TradingJournal(self.db, self.mt5)
+        trades = journal.load_trades(days_back=90, include_open=True)
+        stats = journal.compute_stats(trades)
 
-        total_closed = metrics["total_closed"]
-        net_pnl = metrics["net_pnl"]
-        pnl_prefix = "+" if net_pnl >= 0 else ""
-        p_factor_str = f"{metrics['profit_factor']:.2f}" if metrics['profit_factor'] < 90 else "N/A (No Loss)"
-        rr_str = f"1:{metrics['risk_reward_ratio']:.1f}" if metrics['risk_reward_ratio'] > 0 else "-"
+        acc = self.mt5.get_account_info() if hasattr(self.mt5, "get_account_info") else None
 
-        msg = (
-            "📔 *JURNAL TRADING & EVALUASI PERFORMA (WIB)*\n\n"
-            "📊 *Metrik Performa Keseluruhan:*\n"
-            f"• *Total Selesai:* `{total_closed}` Transaksi (Aktif: `{metrics['open_trades']}`)\n"
-            f"• 🎯 *Menang (TP):* `{metrics['wins']}` | 🛑 *Kalah (SL):* `{metrics['losses']}` | 🛡️ *BEP:* `{metrics['beps']}`\n"
-            f"• 📈 *Real Win Rate (Win vs Loss):* `{metrics['adjusted_win_rate']:.1f}%`\n"
-            f"• 🛡️ *Capital Preserved (Win + BEP):* `{metrics['capital_preserved_rate']:.1f}%`\n"
-            f"• 💰 *Net PnL:* `{pnl_prefix}${net_pnl:.2f}`\n"
-            f"   └ Gross Profit: `+${metrics['gross_profit']:.2f}` | Gross Loss: `-${metrics['gross_loss']:.2f}`\n"
-            f"• ⚖️ *Profit Factor:* `{p_factor_str}` | *R:R:* `{rr_str}`\n"
-            f"• 💵 *Avg Win:* `+${metrics['avg_win']:.2f}` | *Avg Loss:* `-${metrics['avg_loss']:.2f}`\n"
-            f"• 🏆 *Best:* `+${metrics['best_trade']:.2f}` | ⚠️ *Worst:* `-${abs(metrics['worst_trade']):.2f}`\n\n"
+        img_bytes = render_dashboard(
+            stats,
+            account=acc,
+            title="AI TRADE  •  TRADING JOURNAL",
+            period_label="Periode: 90 hari terakhir"
         )
 
-        if metrics.get("by_symbol"):
-            msg += "🪙 *Breakdown Performa per Pair:*\n"
-            for sym, sdata in metrics["by_symbol"].items():
-                p_sym_prefix = "+" if sdata["pnl"] >= 0 else ""
-                msg += f"• *{sym}:* `{sdata['total']}` Trade | WR: `{sdata['win_rate']:.1f}%` | PnL: `{p_sym_prefix}${sdata['pnl']:.2f}`\n"
-            msg += "\n"
+        net_pnl = stats["net_pnl"]
+        pnl_prefix = "+" if net_pnl >= 0 else ""
+        pf_str = "∞" if stats["profit_factor"] == float("inf") else f"{stats['profit_factor']:.2f}"
+        rr_str = f"1:{stats['risk_reward_ratio']:.2f}" if stats["risk_reward_ratio"] else "-"
 
-        if recent_trades:
-            msg += "📋 *5 Transaksi Terakhir (Detail Jurnal):*\n"
-            for idx, t in enumerate(recent_trades[:5], 1):
-                status = t.get("status", "OPEN")
-                sym = t.get("symbol", "")
-                action = t.get("action", "")
-                pnl = float(t.get("profit_loss") or 0.0)
-                dec = 3 if "JPY" in sym else (2 if ("BTC" in sym or "XAU" in sym) else 5)
-                ep = float(t.get("entry_price") or 0.0)
-                score = t.get("confluence_score", 0)
-                raw_reason = str(t.get("ai_reasoning") or "").replace("_", " ").replace("*", "")
-                reason = (raw_reason[:65] + "...") if len(raw_reason) > 65 else raw_reason
-
-                if status == "OPEN":
-                    badge = "🟢 [OPEN]"
-                elif pnl > 0.05:
-                    badge = f"🎯 [WIN +${pnl:.2f}]"
-                elif abs(pnl) <= 0.05:
-                    badge = "🛡️ [BEP $0.00]"
-                else:
-                    badge = f"🛑 [LOSS -${abs(pnl):.2f}]"
-
-                msg += f"{idx}. {badge} *#{t['ticket']}* `{sym}` ({action})\n"
-                msg += f"   • Entry: `{ep:.{dec}f}` | Skor AI: `{score}/100`\n"
-                if reason:
-                    msg += f"   • Catatan AI: _{reason}_\n"
-            msg += "\n"
-
-        msg += (
-            "💡 *Aksi Jurnal Cepat:*\n"
-            "Gunakan tombol di bawah untuk download file spreadsheet atau minta evaluasi Gemini AI:"
+        caption = (
+            "📔 *JURNAL TRADING & EVALUASI PERFORMA*\n\n"
+            f"• *Net PnL:* `{pnl_prefix}${net_pnl:,.2f}` (Gross: `+${stats['gross_profit']:,.2f}` / `-${stats['gross_loss']:,.2f}`)\n"
+            f"• *Win Rate:* `{stats['win_rate']:.1f}%` ({stats['wins']}W / {stats['losses']}L / {stats['beps']}BE)\n"
+            f"• *Profit Factor:* `{pf_str}` | *R:R:* `{rr_str}`\n"
+            f"• *Expectancy:* `{stats['expectancy']:+.2f}`/trade | *Max DD:* `-${stats['max_drawdown']:,.2f}`\n"
+            f"• *Posisi Berjalan:* `{stats['open_trades']}` (Floating: `{money(stats['floating_pnl'])}`)\n\n"
+            "💡 _Pilih menu visual di bawah untuk Kalender PnL Harian, Log Trade, atau Download Excel:_"
         )
 
         inline_kb = InlineKeyboardMarkup([
             [
-                InlineKeyboardButton("📥 Download CSV Jurnal", callback_data="journal_csv"),
+                InlineKeyboardButton("📅 Kalender PnL", callback_data="journal_calendar"),
+                InlineKeyboardButton("📋 Log Transaksi", callback_data="journal_tradelog"),
+            ],
+            [
+                InlineKeyboardButton("📊 Download Excel (.xlsx)", callback_data="journal_excel"),
+                InlineKeyboardButton("📥 Download CSV", callback_data="journal_csv"),
+            ],
+            [
                 InlineKeyboardButton("🧠 Evaluasi AI Gemini", callback_data="journal_eval")
             ]
         ])
 
         target = update.callback_query.message if update.callback_query else update.message
         try:
-            await target.reply_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=inline_kb)
-        except Exception:
-            clean_msg = msg.replace("*", "").replace("`", "").replace("_", "")
-            await target.reply_text(clean_msg, parse_mode=None, reply_markup=inline_kb)
+            await target.reply_photo(
+                photo=img_bytes,
+                caption=caption,
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=inline_kb
+            )
+        except Exception as e:
+            logger.warning(f"Error sending journal dashboard photo: {e}")
+            await target.reply_text(caption, parse_mode=ParseMode.MARKDOWN, reply_markup=inline_kb)
 
-    async def _cmd_export(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Export complete trading journal into a CSV file sent directly to Telegram."""
+    async def _cmd_calendar(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Display monthly PnL calendar grid image with daily PnL and weekly totals."""
+        self._register_active_chat(update)
+        self._sync_broker_data()
+
+        now = get_wib_now()
+        year = now.year
+        month = now.month
+
+        if context and context.args:
+            try:
+                if len(context.args) == 1:
+                    month = int(context.args[0])
+                elif len(context.args) >= 2:
+                    month = int(context.args[0])
+                    year = int(context.args[1])
+            except Exception:
+                pass
+
+        journal = TradingJournal(self.db, self.mt5)
+        trades = journal.load_trades(days_back=120, include_open=True)
+        stats = journal.compute_stats(trades)
+
+        cal_bytes = render_calendar(stats["daily"], year, month)
+        ms = TradingJournal.month_stats(stats["daily"], year, month)
+        net_str = f"+${ms['net']:.2f}" if ms['net'] >= 0 else f"-${abs(ms['net']):.2f}"
+
+        caption = (
+            f"📅 *KALENDER P&L — {MONTHS_ID[month - 1].upper()} {year}*\n\n"
+            f"• *Net Bulan Ini:* `{net_str}`\n"
+            f"• *Total Transaksi:* `{ms['trades']}` trade ({ms['wins']}W / {ms['losses']}L)\n"
+            f"• *Hari Trading:* `{ms['trading_days']}` hari (🟢 `{ms['green_days']}` profit / 🔴 `{ms['red_days']}` loss)\n"
+        )
+
+        prev_y, prev_m = shift_month(year, month, -1)
+        next_y, next_m = shift_month(year, month, +1)
+        inline_kb = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("◀ Bulan Lalu", callback_data=f"cal_{prev_y}_{prev_m}"),
+                InlineKeyboardButton("Bulan Ini", callback_data=f"cal_{now.year}_{now.month}"),
+                InlineKeyboardButton("Bulan Depan ▶", callback_data=f"cal_{next_y}_{next_m}"),
+            ],
+            [
+                InlineKeyboardButton("📊 Dashboard Performa", callback_data="journal_chart"),
+                InlineKeyboardButton("📥 Download Excel", callback_data="journal_excel"),
+            ]
+        ])
+
+        target = update.callback_query.message if update.callback_query else update.message
+        try:
+            await target.reply_photo(
+                photo=cal_bytes,
+                caption=caption,
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=inline_kb
+            )
+        except Exception as e:
+            logger.warning(f"Error sending calendar photo: {e}")
+            await target.reply_text(caption, parse_mode=ParseMode.MARKDOWN, reply_markup=inline_kb)
+
+    async def _cmd_chart(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Direct shortcut to view the visual performance dashboard."""
+        await self._cmd_journal(update, context)
+
+    async def _cmd_tradelog(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Display visual trade log table image."""
+        self._register_active_chat(update)
+        self._sync_broker_data()
+
+        journal = TradingJournal(self.db, self.mt5)
+        trades = journal.load_trades(days_back=90, include_open=True)
+
+        log_bytes = render_trade_log(trades, limit=15)
+        caption = "📋 *LOG 15 TRANSAKSI TERAKHIR (VISUAL)*\n_Menampilkan harga entry/exit, durasi hold, sesi, dan PnL._"
+
+        inline_kb = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("📅 Kalender PnL", callback_data="journal_calendar"),
+                InlineKeyboardButton("📊 Dashboard", callback_data="journal_chart"),
+            ],
+            [
+                InlineKeyboardButton("📥 Download Excel (.xlsx)", callback_data="journal_excel"),
+            ]
+        ])
+
+        target = update.callback_query.message if update.callback_query else update.message
+        try:
+            await target.reply_photo(
+                photo=log_bytes,
+                caption=caption,
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=inline_kb
+            )
+        except Exception as e:
+            logger.warning(f"Error sending trade log photo: {e}")
+            await target.reply_text(caption, parse_mode=ParseMode.MARKDOWN, reply_markup=inline_kb)
+
+    async def _cmd_export_excel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Export fully-styled, professional 3-sheet Excel workbook (.xlsx)."""
+        self._register_active_chat(update)
+        self._sync_broker_data()
+
+        journal = TradingJournal(self.db, self.mt5)
+        trades = journal.load_trades(days_back=180, include_open=True)
+        stats = journal.compute_stats(trades)
+
+        xlsx_bytes = export_journal_excel(trades, stats)
+        now_wib = get_wib_now()
+        filename = f"Trading_Journal_{now_wib.strftime('%Y%m%d_%H%M%S')}.xlsx"
+        bio = io.BytesIO(xlsx_bytes)
+        bio.name = filename
+
+        caption = (
+            "📊 *File Trading Journal Profesional (.xlsx)*\n\n"
+            "• *Format:* Workbook Microsoft Excel asli dengan 3 Sheet tertata rapi:\n"
+            "   1. *Dashboard & KPI:* Ringkasan metrik kuantitatif & breakdown per pair.\n"
+            "   2. *Kalender PnL Harian:* Rekapitulasi per hari (warna hijau/merah otomatis).\n"
+            "   3. *Log Semua Trade:* Rincian lengkap entry, exit, durasi, sesi, skor AI & alasan AI.\n"
+            "• Siap dibuka langsung di *Microsoft Excel*, *Google Sheets*, atau *WPS Office* tanpa masalah format koma/titik!"
+        )
+
+        target = update.callback_query.message if update.callback_query else update.message
+        await target.reply_document(
+            document=bio,
+            filename=filename,
+            caption=caption,
+            parse_mode=ParseMode.MARKDOWN
+        )
+
+    async def _cmd_export_csv(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Export CSV formatted trade history."""
         self._register_active_chat(update)
         self._sync_broker_data()
 
         csv_content = self.db.export_trades_to_csv()
-        wib = timezone(timedelta(hours=7))
-        filename = f"Trading_Journal_{datetime.now(wib).strftime('%Y%m%d_%H%M%S')}.csv"
+        now_wib = get_wib_now()
+        filename = f"Trading_Journal_{now_wib.strftime('%Y%m%d_%H%M%S')}.csv"
         bio = io.BytesIO(csv_content.encode("utf-8-sig"))
         bio.name = filename
 
-        caption = (
-            "📄 *File Trading Journal Lengkap (CSV)*\n\n"
-            "• Berisi riwayat lengkap setiap trade: Tiket, Waktu Entry & Exit (WIB), Pair, Lot, Harga, SL, TP, PnL, Skor AI, dan Analisa AI.\n"
-            "• Format `.csv` ini siap langsung dibuka di *Microsoft Excel*, *Google Sheets*, atau diimpor ke *Notion*."
-        )
-
+        caption = "📄 *File Trading Journal (CSV Raw)*\n_Format teks CSV standar untuk integrasi database/Notion._"
         target = update.callback_query.message if update.callback_query else update.message
         await target.reply_document(
             document=bio,
@@ -902,20 +1018,32 @@ class TelegramBotManager:
         target = update.callback_query.message if update.callback_query else update.message
         wait_msg = await target.reply_text("🧠 *Sedang menganalisis performa trading jurnal menggunakan Gemini AI...*", parse_mode=ParseMode.MARKDOWN)
 
-        metrics = self.db.get_detailed_journal_metrics()
-        recent_trades = self.db.get_all_journal_trades(limit=10)
+        journal = TradingJournal(self.db, self.mt5)
+        trades = journal.load_trades(days_back=90, include_open=True)
+        stats = journal.compute_stats(trades)
+        recent_trades = [
+            {
+                "ticket": t.ticket,
+                "symbol": t.symbol,
+                "action": t.action,
+                "profit_loss": t.pnl,
+                "close_reason": t.close_reason,
+                "ai_reasoning": t.ai_reasoning
+            }
+            for t in trades if t.status == "CLOSED"
+        ][-10:]
 
         if not self.gemini:
             await wait_msg.edit_text("Gemini Analyst tidak tersedia untuk evaluasi jurnal.")
             return
 
-        evaluation_text = self.gemini.evaluate_journal(metrics, recent_trades)
+        evaluation_text = self.gemini.evaluate_journal(stats, recent_trades)
 
         full_msg = (
             "🧠 *EVALUASI JURNAL TRADING OLEH GEMINI AI*\n"
             f"📅 _Waktu Analisis: {get_wib_str()}_\n\n"
             f"{evaluation_text}\n\n"
-            "💡 _Evaluasi ini di-generate otomatis oleh Gemini AI berdasarkan riwayat trade riil dan parameter manajemen resiko._"
+            "💡 _Evaluasi ini di-generate otomatis oleh Gemini AI berdasarkan data transaksi riil dan prinsip quantitative hedge fund._"
         )
 
         try:
@@ -925,14 +1053,32 @@ class TelegramBotManager:
             await target.reply_text(clean_eval, parse_mode=None)
 
     async def _handle_journal_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle inline button clicks for journal actions."""
+        """Handle inline button clicks for visual journal and calendar navigation."""
         query = update.callback_query
         await query.answer()
-        data = query.data
+        data = str(query.data or "")
 
-        if data == "journal_csv":
-            await self._cmd_export(update, context)
+        if data == "journal_calendar":
+            await self._cmd_calendar(update, context)
+        elif data == "journal_chart":
+            await self._cmd_chart(update, context)
+        elif data == "journal_tradelog":
+            await self._cmd_tradelog(update, context)
+        elif data == "journal_excel":
+            await self._cmd_export_excel(update, context)
+        elif data == "journal_csv":
+            await self._cmd_export_csv(update, context)
         elif data == "journal_eval":
+            await self._cmd_eval(update, context)
+        elif data.startswith("cal_"):
+            try:
+                parts = data.split("_")
+                y = int(parts[1])
+                m = int(parts[2])
+                context.args = [str(m), str(y)]
+                await self._cmd_calendar(update, context)
+            except Exception as e:
+                logger.warning(f"Error handling calendar nav callback {data}: {e}")
             await self._cmd_eval(update, context)
 
     async def _cmd_keys(self, update: Update, context: ContextTypes.DEFAULT_TYPE):

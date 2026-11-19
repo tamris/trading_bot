@@ -810,13 +810,16 @@ class ExnessApiConnector:
             # Position has NO close deal yet (still open or history not settled) -> never pretend open deal is a BEP close!
             return None
 
+        close_deals = sorted(close_deals, key=lambda x: str(x.get("create_time", "")))
         final_deal = close_deals[-1]
         exit_price = float(final_deal.get("price", 0.0))
-        profit_obj = final_deal.get("profit", {})
-        if isinstance(profit_obj, dict):
-            profit_amount = float(profit_obj.get("amount", 0.0))
-        else:
-            profit_amount = float(profit_obj or 0.0)
+        profit_amount = 0.0
+        for cd in close_deals:
+            profit_obj = cd.get("profit", {})
+            if isinstance(profit_obj, dict):
+                profit_amount += float(profit_obj.get("amount", 0.0))
+            else:
+                profit_amount += float(profit_obj or 0.0)
 
         if abs(profit_amount) <= 0.05:
             reason_str = "BREAK_EVEN"
@@ -852,22 +855,27 @@ class ExnessApiConnector:
             if not pos_id:
                 continue
             if pos_id not in pos_map:
-                pos_map[pos_id] = {"open": None, "close": None}
+                pos_map[pos_id] = {"open": None, "closes": []}
             if d.get("type") == "open":
                 pos_map[pos_id]["open"] = d
             elif d.get("type") == "close":
-                pos_map[pos_id]["close"] = d
+                pos_map[pos_id]["closes"].append(d)
+
+        def _deal_pnl(deal: Dict[str, Any]) -> float:
+            p_obj = deal.get("profit", {})
+            return float(p_obj.get("amount", 0.0)) if isinstance(p_obj, dict) else float(p_obj or 0.0)
 
         closed_list = []
         for pos_id, pdata in pos_map.items():
-            if pdata["close"]:
-                c = pdata["close"]
+            if pdata["closes"]:
+                # Aggregate partial closes (e.g. 50% Partial TP + final exit) into one journal trade
+                closes = sorted(pdata["closes"], key=lambda x: str(x.get("create_time", "")))
+                c = closes[-1]
                 o = pdata["open"]
-                p_obj = c.get("profit", {})
-                pnl = float(p_obj.get("amount", 0.0)) if isinstance(p_obj, dict) else float(p_obj or 0.0)
+                pnl = sum(_deal_pnl(x) for x in closes)
                 open_p = float(o.get("price", 0.0)) if o else float(c.get("price", 0.0))
                 close_p = float(c.get("price", 0.0))
-                vol = float(c.get("volume", 0.01))
+                vol = round(sum(float(x.get("volume", 0.0) or 0.0) for x in closes), 2) or float(c.get("volume", 0.01))
                 inst = c.get("instrument", "")
                 direction = o.get("direction", "buy").upper() if o else ("SELL" if c.get("direction") == "buy" else "BUY")
 
