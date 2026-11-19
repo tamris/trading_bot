@@ -9,7 +9,7 @@ import asyncio
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from logging.handlers import RotatingFileHandler
-from typing import Tuple, Dict, Any, Optional, List
+from typing import Tuple, Dict, Any, Optional, List, Set
 import psutil
 
 # Force IPv4 for api.telegram.org to prevent IPv6 blackhole timeouts on Indonesian ISPs
@@ -113,6 +113,7 @@ class TradingBotApp:
 
         self.scheduler = AsyncIOScheduler()
         self._is_running = False
+        self._bep_alerted_tickets: Set[int] = set()
 
     async def start(self):
         """Start MT5 connection, Telegram bot, and scheduler."""
@@ -441,6 +442,12 @@ class TradingBotApp:
                     entry_p = res.get("entry_price", 0.0)
                     self.db.update_sl(t, entry_p)
 
+                    # Deduplication guard: strictly at most one alert per ticket (memory + persistent DB)
+                    if t in self._bep_alerted_tickets or self.db.is_bep_alert_sent(t):
+                        continue
+                    self._bep_alerted_tickets.add(t)
+                    self.db.mark_bep_alert_sent(t)
+
                     if action_type == "PARTIAL_TP":
                         # Record partial realization in SQLite DB
                         self.db.update_lot_and_pnl(
@@ -467,6 +474,9 @@ class TradingBotApp:
             current_mt5_positions = self.mt5.get_open_positions()
             active_tickets = {p["ticket"] for p in current_mt5_positions}
 
+            # Prune memory set for closed tickets
+            self._bep_alerted_tickets = {t for t in self._bep_alerted_tickets if t in active_tickets}
+
             for p in current_mt5_positions:
                 t = p["ticket"]
                 existing = self.db.get_trade_by_ticket(t)
@@ -489,6 +499,15 @@ class TradingBotApp:
                 elif existing.get("status") != "OPEN":
                     # Restore trade if it was prematurely marked closed due to a prior transient API glitch
                     self.db.reopen_trade(t)
+
+                # If current position already has its SL set at or past entry (Break-Even), ensure alerted flags are set
+                p_sl = float(p.get("sl") or 0.0)
+                p_entry = float(p.get("price_open") or 0.0)
+                if p_sl > 0 and p_entry > 0:
+                    p_type = p.get("type", "").upper()
+                    if (p_type == "BUY" and p_sl >= p_entry - 0.05) or (p_type == "SELL" and p_sl <= p_entry + 0.05):
+                        self._bep_alerted_tickets.add(t)
+                        self.db.mark_bep_alert_sent(t)
 
             # 4. Check for closed trades from SQLite tracked trades
             # Guard: NEVER assume positions closed if the broker snapshot failed (e.g. HTTP 429 / timeout)!

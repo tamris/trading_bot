@@ -43,6 +43,8 @@ class RiskManager:
 
         # Track tickets that have already taken Partial TP
         self._partial_closed_tickets: Set[int] = set()
+        # Track tickets that have already had Break-Even applied
+        self._bep_moved_tickets: Set[int] = set()
 
     def initialize_daily_equity(self, current_equity: Optional[float] = None, force_reset: bool = False):
         """Record the initial realized balance at the start of a trading day (00:00 WIB)."""
@@ -359,9 +361,14 @@ class RiskManager:
         Check active positions and apply Partial Take Profit (50%) + Move SL to Break-Even
         once profit reaches 1:1 Risk-to-Reward (1.5 * ATR).
         Returns list of execution result dictionaries.
+        Guarantees strictly at most one BEP execution and alert per ticket.
         """
         positions = self.mt5.get_open_positions()
         results = []
+
+        active_tickets = {p["ticket"] for p in positions}
+        self._bep_moved_tickets = {t for t in self._bep_moved_tickets if t in active_tickets}
+        self._partial_closed_tickets = {t for t in self._partial_closed_tickets if t in active_tickets}
 
         for p in positions:
             ticket = p["ticket"]
@@ -371,6 +378,33 @@ class RiskManager:
             current_sl = float(p.get("sl") or 0.0)
             price_current = float(p.get("price_current") or price_open)
             current_vol = float(p.get("volume") or 0.01)
+
+            # 1. Skip if already tracked as BEP moved in memory
+            if ticket in self._bep_moved_tickets:
+                continue
+
+            # 2. Check if persistent DB already marked BEP alert sent
+            if self.db and hasattr(self.db, "is_bep_alert_sent") and self.db.is_bep_alert_sent(ticket):
+                self._bep_moved_tickets.add(ticket)
+                continue
+
+            # 3. Determine price tolerance to handle broker rounding (e.g. 3733.98 vs 3733.978)
+            sym_spec = self.mt5.get_symbol_info(symbol) if hasattr(self.mt5, "get_symbol_info") else None
+            point = float(sym_spec.get("point", 0.01)) if sym_spec else 0.01
+            tolerance = max(point * 5.0, 0.05)
+
+            # If current SL is already at or past entry (e.g. broker rounded or trailing), treat as already at BEP
+            if current_sl > 0.0:
+                if pos_type == "BUY" and current_sl >= (price_open - tolerance):
+                    self._bep_moved_tickets.add(ticket)
+                    if self.db and hasattr(self.db, "mark_bep_alert_sent"):
+                        self.db.mark_bep_alert_sent(ticket)
+                    continue
+                elif pos_type == "SELL" and current_sl <= (price_open + tolerance):
+                    self._bep_moved_tickets.add(ticket)
+                    if self.db and hasattr(self.db, "mark_bep_alert_sent"):
+                        self.db.mark_bep_alert_sent(ticket)
+                    continue
 
             # Case-insensitive ATR lookup with symbol normalization
             sym_clean = self._clean_symbol(symbol)
@@ -387,9 +421,11 @@ class RiskManager:
             has_reached_target = False
 
             if pos_type == "BUY":
-                has_reached_target = (price_current - price_open >= target_profit_dist) and (current_sl < price_open)
+                is_sl_below_entry = (current_sl == 0.0 or current_sl < (price_open - tolerance))
+                has_reached_target = (price_current - price_open >= target_profit_dist) and is_sl_below_entry
             elif pos_type == "SELL":
-                has_reached_target = (price_open - price_current >= target_profit_dist) and (current_sl > price_open or current_sl == 0.0)
+                is_sl_above_entry = (current_sl == 0.0 or current_sl > (price_open + tolerance))
+                has_reached_target = (price_open - price_current >= target_profit_dist) and is_sl_above_entry
 
             if has_reached_target:
                 # 1. Attempt 50% Partial Take Profit if enabled and volume allows (>= 0.02 lot)
@@ -410,6 +446,9 @@ class RiskManager:
 
                 # 2. Always move SL to Break-Even (Entry Price)
                 if self.mt5.modify_position_sl(ticket, price_open):
+                    self._bep_moved_tickets.add(ticket)
+                    if self.db and hasattr(self.db, "mark_bep_alert_sent"):
+                        self.db.mark_bep_alert_sent(ticket)
                     logger.info(f"Moved SL to Break-Even for #{ticket} ({symbol}) at {price_open}")
                     if partial_tp_done:
                         results.append({

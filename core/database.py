@@ -80,6 +80,8 @@ class TradeDatabase:
                 cursor.execute("ALTER TABLE trades ADD COLUMN entry_alert_sent INTEGER DEFAULT 0")
             if "close_alert_sent" not in cols:
                 cursor.execute("ALTER TABLE trades ADD COLUMN close_alert_sent INTEGER DEFAULT 0")
+            if "bep_alert_sent" not in cols:
+                cursor.execute("ALTER TABLE trades ADD COLUMN bep_alert_sent INTEGER DEFAULT 0")
 
             # Table for persistent Telegram subscribers
             cursor.execute("""
@@ -290,6 +292,30 @@ class TradeDatabase:
                 return True
         except Exception as e:
             logger.error(f"[DB] Error updating SL for #{ticket}: {e}")
+            return False
+
+    def mark_bep_alert_sent(self, ticket: int) -> bool:
+        """Mark Break-Even alert as sent in database to prevent repeated notifications."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("UPDATE trades SET bep_alert_sent = 1 WHERE ticket = ?", (ticket,))
+                conn.commit()
+                return True
+        except Exception as e:
+            logger.error(f"[DB] Error marking BEP alert sent for #{ticket}: {e}")
+            return False
+
+    def is_bep_alert_sent(self, ticket: int) -> bool:
+        """Check whether Break-Even alert has already been sent for this ticket."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT bep_alert_sent FROM trades WHERE ticket = ?", (ticket,))
+                row = cursor.fetchone()
+                return bool(row and row["bep_alert_sent"] == 1)
+        except Exception as e:
+            logger.error(f"[DB] Error checking BEP alert status for #{ticket}: {e}")
             return False
 
     def update_lot_and_pnl(self, ticket: int, remaining_lot: float, partial_pnl: float) -> bool:

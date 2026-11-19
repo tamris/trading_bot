@@ -101,6 +101,49 @@ def test_breakeven_trailing(risk_env):
     pos = [p for p in connector._mock_positions if p["ticket"] == ticket][0]
     assert pos["sl"] == 2650.00
 
+    # Second BEP check must NOT trigger again (in-memory deduplication)
+    modified_again = rm.check_and_apply_breakeven(current_atr={"XAUUSD": 10.0})
+    assert len(modified_again) == 0
+
+
+def test_breakeven_float_tolerance_sell(risk_env):
+    connector, rm = risk_env
+    # SELL order on XAUUSD with 3 decimals entry (e.g. 3733.978)
+    order = connector.execute_order(
+        symbol="XAUUSD",
+        order_type="SELL",
+        volume=0.01,
+        price=3733.978,
+        sl=3745.00,
+        tp=3700.00
+    )
+    ticket = order["ticket"]
+    for p in connector._mock_positions:
+        if p["ticket"] == ticket:
+            p["price_open"] = 3733.978
+            # In profit (price dropped to 3715.00)
+            p["price_current"] = 3715.00
+
+    # ATR = 5.0 -> target profit dist = 7.5 points
+    res = rm.check_and_apply_breakeven(current_atr={"XAUUSD": 5.0})
+    assert len(res) == 1
+    assert res[0]["ticket"] == ticket
+
+    # Broker rounded SL to 2 decimals (3733.98)
+    for p in connector._mock_positions:
+        if p["ticket"] == ticket:
+            p["sl"] = 3733.98
+
+    # Second check: despite 3733.98 > 3733.978, float tolerance and _bep_moved_tickets prevent re-triggering
+    res2 = rm.check_and_apply_breakeven(current_atr={"XAUUSD": 5.0})
+    assert len(res2) == 0
+
+    # Simulate bot restart (new RiskManager instance) where broker position still has sl=3733.98
+    rm_restarted = RiskManager(connector)
+    res_restarted = rm_restarted.check_and_apply_breakeven(current_atr={"XAUUSD": 5.0})
+    # Due to tolerance check (3733.98 <= 3733.978 + 0.05), it must NOT re-trigger!
+    assert len(res_restarted) == 0
+
 
 def test_daily_drawdown_immune_to_floating_restart_and_wd():
     class FakeMT5:
@@ -150,3 +193,30 @@ def test_daily_drawdown_immune_to_floating_restart_and_wd():
     is_ok, dd_pct, _ = rm.check_daily_drawdown()
     assert is_ok is True
     assert dd_pct == pytest.approx(0.0)
+
+
+def test_bep_database_persistence(tmp_path):
+    from core.database import TradeDatabase
+    db_file = tmp_path / "test_trades.db"
+    db = TradeDatabase(str(db_file))
+
+    # Record entry
+    db.record_entry(
+        ticket=999999,
+        symbol="XAUUSD",
+        action="SELL",
+        lot=0.01,
+        entry_price=3733.978,
+        sl_price=3745.00,
+        tp_price=3700.00
+    )
+
+    assert db.is_bep_alert_sent(999999) is False
+
+    # Mark BEP alert sent
+    db.mark_bep_alert_sent(999999)
+    assert db.is_bep_alert_sent(999999) is True
+
+    # Re-open DB instance (simulating app restart)
+    db2 = TradeDatabase(str(db_file))
+    assert db2.is_bep_alert_sent(999999) is True
