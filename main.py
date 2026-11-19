@@ -433,44 +433,7 @@ class TradingBotApp:
                         atr_series = TechnicalEngine.calculate_atr(df, 14)
                         current_atr[symbol] = float(atr_series.iloc[-1])
 
-            # 2. Check and Apply Partial TP (50%) and Break-Even Trailing Stop Loss
-            bep_results = self.risk_manager.check_and_apply_breakeven(current_atr)
-            if bep_results:
-                for res in bep_results:
-                    t = res["ticket"]
-                    action_type = res.get("action")
-                    entry_p = res.get("entry_price", 0.0)
-                    self.db.update_sl(t, entry_p)
-
-                    # Deduplication guard: strictly at most one alert per ticket (memory + persistent DB)
-                    if t in self._bep_alerted_tickets or self.db.is_bep_alert_sent(t):
-                        continue
-                    self._bep_alerted_tickets.add(t)
-                    self.db.mark_bep_alert_sent(t)
-
-                    if action_type == "PARTIAL_TP":
-                        # Record partial realization in SQLite DB
-                        self.db.update_lot_and_pnl(
-                            ticket=t,
-                            remaining_lot=res["remaining_lot"],
-                            partial_pnl=res["pnl"]
-                        )
-                        # Broadcast rich Partial TP alert
-                        await self.telegram.send_partial_tp_alert(
-                            ticket=t,
-                            symbol=res["symbol"],
-                            closed_lot=res["closed_lot"],
-                            remaining_lot=res["remaining_lot"],
-                            partial_pnl=res["pnl"],
-                            entry_price=entry_p,
-                            close_price=res["close_price"]
-                        )
-                    else:
-                        # Standard BEP moved alert
-                        msg = f"🛡️ *Break-Even Aktif (WIB):* Stop Loss dipindahkan ke harga Entry (`{entry_p}`) untuk Tiket `#{t}`."
-                        await self.telegram.send_alert(msg)
-
-            # 3. Synchronize any active broker positions into SQLite if missing
+            # 2. Synchronize any active broker positions into SQLite first
             current_mt5_positions = self.mt5.get_open_positions()
             active_tickets = {p["ticket"] for p in current_mt5_positions}
 
@@ -508,6 +471,43 @@ class TradingBotApp:
                     if (p_type == "BUY" and p_sl >= p_entry - 0.05) or (p_type == "SELL" and p_sl <= p_entry + 0.05):
                         self._bep_alerted_tickets.add(t)
                         self.db.mark_bep_alert_sent(t)
+
+            # 3. Check and Apply Partial TP (50%) and Break-Even Trailing Stop Loss
+            bep_results = self.risk_manager.check_and_apply_breakeven(current_atr)
+            if bep_results:
+                for res in bep_results:
+                    t = res["ticket"]
+                    action_type = res.get("action")
+                    entry_p = res.get("entry_price", 0.0)
+                    self.db.update_sl(t, entry_p)
+
+                    # Deduplication guard: strictly at most one alert per ticket (memory + persistent DB)
+                    if t in self._bep_alerted_tickets or self.db.is_bep_alert_sent(t):
+                        continue
+                    self._bep_alerted_tickets.add(t)
+                    self.db.mark_bep_alert_sent(t)
+
+                    if action_type == "PARTIAL_TP":
+                        # Record partial realization in SQLite DB
+                        self.db.update_lot_and_pnl(
+                            ticket=t,
+                            remaining_lot=res["remaining_lot"],
+                            partial_pnl=res["pnl"]
+                        )
+                        # Broadcast rich Partial TP alert
+                        await self.telegram.send_partial_tp_alert(
+                            ticket=t,
+                            symbol=res["symbol"],
+                            closed_lot=res["closed_lot"],
+                            remaining_lot=res["remaining_lot"],
+                            partial_pnl=res["pnl"],
+                            entry_price=entry_p,
+                            close_price=res["close_price"]
+                        )
+                    else:
+                        # Standard BEP moved alert
+                        msg = f"🛡️ *Break-Even Aktif (WIB):* Stop Loss dipindahkan ke harga Entry (`{entry_p}`) untuk Tiket `#{t}`."
+                        await self.telegram.send_alert(msg)
 
             # 4. Check for closed trades from SQLite tracked trades
             # Guard: NEVER assume positions closed if the broker snapshot failed (e.g. HTTP 429 / timeout)!
