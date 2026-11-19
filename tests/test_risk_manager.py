@@ -100,3 +100,53 @@ def test_breakeven_trailing(risk_env):
     # Verify that position's SL was moved to Entry Price (2650.00)
     pos = [p for p in connector._mock_positions if p["ticket"] == ticket][0]
     assert pos["sl"] == 2650.00
+
+
+def test_daily_drawdown_immune_to_floating_restart_and_wd():
+    class FakeMT5:
+        def __init__(self, balance, equity):
+            self.balance = balance
+            self.equity = equity
+
+        def get_account_info(self):
+            return {
+                "balance": self.balance,
+                "equity": self.equity,
+                "profit": self.equity - self.balance
+            }
+
+    class FakeDB:
+        def __init__(self, today_pnl=0.0):
+            self.today_pnl = today_pnl
+
+        def get_today_pnl(self):
+            return self.today_pnl
+
+    # Case 1: Bot starts while a trade is floating +$3.61 (Balance=$100, Equity=$103.61)
+    mt5 = FakeMT5(balance=100.0, equity=103.61)
+    db = FakeDB(today_pnl=0.0)
+    rm = RiskManager(mt5, db=db)
+    rm.initialize_daily_equity()
+    assert rm._daily_starting_equity == pytest.approx(100.0)
+
+    # Trade closes at BEP ($0), next trade floats -$0.11 (Balance=$100, Equity=$99.89)
+    mt5.balance = 100.0
+    mt5.equity = 99.89
+    is_ok, dd_pct, _ = rm.check_daily_drawdown()
+    assert is_ok is True
+    assert dd_pct == pytest.approx(0.11, abs=1e-2)
+
+    # Case 2: Actual realized trading loss of -$3.20 on $100 account -> must breach 3.0%
+    mt5.balance = 96.80
+    mt5.equity = 96.80
+    db.today_pnl = -3.20
+    is_ok, dd_pct, msg = rm.check_daily_drawdown()
+    assert is_ok is False
+    assert dd_pct == pytest.approx(3.20, abs=1e-2)
+    assert "DAILY DRAWDOWN BREACHED" in msg
+
+    # Case 3: Manual /resetdd immediately clears halt
+    rm.reset_drawdown()
+    is_ok, dd_pct, _ = rm.check_daily_drawdown()
+    assert is_ok is True
+    assert dd_pct == pytest.approx(0.0)

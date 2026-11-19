@@ -408,6 +408,38 @@ class ExnessApiConnector:
             comment=comment
         )
 
+    def _format_price(self, symbol: str, price: float) -> str:
+        """Format price string with exact broker digits for the instrument."""
+        spec = self.get_symbol_info(symbol)
+        digits = spec["digits"] if spec else (3 if "JPY" in symbol.upper() else (5 if "EUR" in symbol.upper() else 2))
+        return f"{float(price):.{digits}f}"
+
+    def _poll_operation_status(self, operation_id: str, timeout_seconds: float = 8.0) -> Tuple[str, str]:
+        """
+        Poll Exness asynchronous trading operation until terminal state ('confirmed', 'rejected', 'failed')
+        or timeout. Returns (status, error_message).
+        Endpoint: GET /v1/trading/accounts/{account_id}/operations/{operation_id}
+        """
+        if not operation_id:
+            return "unknown", ""
+
+        deadline = time.time() + timeout_seconds
+        path = f"/v1/trading/accounts/{self.account_id}/operations/{operation_id}"
+        last_status = "pending"
+
+        while time.time() < deadline:
+            time.sleep(0.35)
+            ok, op_data = self._request("GET", path, use_access_point=True)
+            if ok and isinstance(op_data, dict):
+                status = str(op_data.get("status", "pending")).lower()
+                last_status = status
+                if status == "confirmed":
+                    return "confirmed", ""
+                if status in ("rejected", "failed"):
+                    err_msg = op_data.get("error_message") or str(op_data.get("error_code", "Rejected"))
+                    return status, str(err_msg)
+        return last_status, ""
+
     def open_position(
         self,
         symbol: str,
@@ -420,10 +452,22 @@ class ExnessApiConnector:
         """
         Open immediate market position via Exness Trader API.
         Endpoint: POST /v1/trading/accounts/{account_id}/positions
+        Handles Exness asynchronous HTTP 202 AckResponse by polling operation status
+        and resolving the newly created position_id & fill price from a fresh snapshot.
         """
         inst = self.normalize_symbol(symbol)
         side = "buy" if action.upper() == "BUY" else "sell"
         norm_vol = f"{volume:.2f}"
+
+        # Capture existing position IDs before submitting order so we can uniquely identify the new ticket
+        pre_pos_ids = set()
+        ok_pre, pre_snap = self._get_snapshot(max_age_seconds=0.0)
+        if ok_pre and isinstance(pre_snap, dict):
+            pre_pos_ids = {
+                str(p.get("position_id"))
+                for p in pre_snap.get("positions", [])
+                if p.get("position_id") is not None
+            }
 
         body = {
             "instrument": inst,
@@ -432,9 +476,9 @@ class ExnessApiConnector:
             "comment": comment[:31]  # Exness max comment length
         }
         if sl is not None and sl > 0:
-            body["stop_loss_price"] = f"{sl:.5f}" if "EUR" in inst else f"{sl:.2f}"
+            body["stop_loss_price"] = self._format_price(inst, sl)
         if tp is not None and tp > 0:
-            body["take_profit_price"] = f"{tp:.5f}" if "EUR" in inst else f"{tp:.2f}"
+            body["take_profit_price"] = self._format_price(inst, tp)
 
         path = f"/v1/trading/accounts/{self.account_id}/positions"
         logger.info(f"[Exness API] Executing Market {action} {norm_vol} lot on {inst} (SL: {sl}, TP: {tp})...")
@@ -450,8 +494,78 @@ class ExnessApiConnector:
                 "comment": str(err_msg)
             }
 
+        # Invalidate snapshot cache immediately because account positions are changing
+        self._cached_snapshot = None
+
         pos_id = data.get("position_id")
-        exec_price = float(data.get("open_price", data.get("price", 0.0)))
+        exec_price = float(data.get("open_price", data.get("price", 0.0)) or 0.0)
+        operation_id = str(data.get("operation_id") or "")
+
+        if pos_id is None:
+            # Exness REST API returns HTTP 202 Accepted (AckResponse) with operation_id only.
+            logger.info(
+                f"[Exness API] Order accepted asynchronously (operation_id={operation_id}). "
+                "Polling broker confirmation & resolving ticket..."
+            )
+            if operation_id:
+                op_status, op_err = self._poll_operation_status(operation_id, timeout_seconds=8.0)
+                if op_status in ("rejected", "failed"):
+                    logger.error(f"[Exness API] Async order #{operation_id} {op_status}: {op_err}")
+                    return {
+                        "success": False,
+                        "error": f"{op_status.upper()}: {op_err}",
+                        "retcode": 500,
+                        "comment": str(op_err)
+                    }
+
+            # Query fresh snapshot to resolve the exact new position_id & fill price
+            for attempt in range(6):
+                if attempt > 0:
+                    time.sleep(0.5)
+                ok_post, post_snap = self._get_snapshot(max_age_seconds=0.0)
+                if ok_post and isinstance(post_snap, dict):
+                    candidates = []
+                    for p in post_snap.get("positions", []):
+                        pid = str(p.get("position_id") or "")
+                        if not pid or pid in pre_pos_ids:
+                            continue
+                        p_inst = self.normalize_symbol(p.get("instrument", ""))
+                        p_dir = str(p.get("direction", "")).lower()
+                        if p_inst == inst and p_dir == side:
+                            candidates.append(p)
+                    if candidates:
+                        candidates.sort(key=lambda x: int(x["position_id"]), reverse=True)
+                        chosen = candidates[0]
+                        pos_id = int(chosen["position_id"])
+                        exec_price = float(chosen.get("open_price", 0.0) or 0.0)
+                        break
+
+            # Secondary fallback: check recent closed deals if position closed instantaneously
+            if pos_id is None:
+                try:
+                    recent_deals = self.get_recent_closed_positions(days_back=1)
+                    for rc in reversed(recent_deals):
+                        if (
+                            self.normalize_symbol(rc.get("symbol", "")) == inst
+                            and str(rc.get("ticket")) not in pre_pos_ids
+                        ):
+                            pos_id = int(rc["ticket"])
+                            exec_price = float(rc.get("entry_price", 0.0) or 0.0)
+                            break
+                except Exception as e:
+                    logger.warning(f"[Exness API] Secondary deal lookup failed: {e}")
+
+            if pos_id is None:
+                logger.error(
+                    f"[Exness API] Order accepted (op={operation_id}) but position_id could not be confirmed in snapshot."
+                )
+                return {
+                    "success": False,
+                    "error": f"Order accepted (op #{operation_id}) but ticket confirmation timed out",
+                    "retcode": 504,
+                    "comment": "Confirmation timeout"
+                }
+
         logger.info(f"[Exness API] Position opened successfully! Position #{pos_id} @ {exec_price}")
 
         return {
@@ -520,16 +634,18 @@ class ExnessApiConnector:
 
             spec = self.get_symbol_info(inst)
             c_size = spec.get("contract_size", 1.0) if spec else 1.0
+            digits = spec.get("digits", 2) if spec else 2
 
             # Dynamic floating PnL and current price calculation
             if num_positions == 1:
                 # With 1 position, total unrealized PnL from Exness account equity is exact
                 profit_val = total_pnl
                 if (vol * c_size) > 0:
+                    price_delta = (profit_val * open_p / (vol * c_size)) if "JPY" in inst else (profit_val / (vol * c_size))
                     if direction == "BUY":
-                        current_p = open_p + (profit_val / (vol * c_size))
+                        current_p = open_p + price_delta
                     else:
-                        current_p = open_p - (profit_val / (vol * c_size))
+                        current_p = open_p - price_delta
                 else:
                     current_p = open_p
             else:
@@ -563,7 +679,7 @@ class ExnessApiConnector:
                 "price_open": open_p,
                 "sl": sl_val,
                 "tp": tp_val,
-                "price_current": round(current_p, 5 if "EUR" in inst else 2),
+                "price_current": round(current_p, digits),
                 "profit": profit_val,
                 "time": p.get("create_time", "")
             })
@@ -579,15 +695,16 @@ class ExnessApiConnector:
         Update Stop Loss price for Break-Even trailing.
         Endpoint: PATCH /v1/trading/accounts/{account_id}/orders/{order_id}
         """
-        path = f"/v1/trading/accounts/{self.account_id}/snapshot"
-        ok, data = self._request("GET", path, use_access_point=True)
+        ok, data = self._get_snapshot(max_age_seconds=0.0)
         if not ok:
             return False
 
         order_id = None
+        order_inst = ""
         for o in data.get("orders", []):
             if str(o.get("position_id")) == str(ticket):
                 order_id = o.get("order_id")
+                order_inst = str(o.get("instrument") or "")
                 break
 
         if not order_id:
@@ -595,12 +712,18 @@ class ExnessApiConnector:
             return False
 
         patch_path = f"/v1/trading/accounts/{self.account_id}/orders/{order_id}"
+        formatted_sl = (
+            self._format_price(order_inst, new_sl)
+            if order_inst
+            else (f"{new_sl:.5f}" if new_sl < 50 else f"{new_sl:.2f}")
+        )
         body = {
-            "stop_loss_price": f"{new_sl:.5f}" if new_sl < 50 else f"{new_sl:.2f}"
+            "stop_loss_price": formatted_sl
         }
         patch_ok, patch_data = self._request("PATCH", patch_path, body=body, use_access_point=True)
         if patch_ok:
-            logger.info(f"[Exness API] SL modified successfully for Position #{ticket} -> {new_sl}")
+            self._cached_snapshot = None
+            logger.info(f"[Exness API] SL modified successfully for Position #{ticket} -> {formatted_sl}")
             return True
 
         logger.error(f"[Exness API] Failed to modify SL for Position #{ticket}: {patch_data}")
@@ -617,11 +740,12 @@ class ExnessApiConnector:
 
         ok, data = self._request("DELETE", path, use_access_point=True)
         if ok:
+            self._cached_snapshot = None
             logger.info(f"[Exness API] Partial close succeeded for #{ticket} ({norm_vol} lot closed).")
             return {
                 "success": True,
                 "closed_volume": volume,
-                "price": float(data.get("price", 0.0))
+                "price": float(data.get("price", 0.0) or 0.0)
             }
 
         logger.error(f"[Exness API] Partial close failed for #{ticket}: {data}")
@@ -637,6 +761,7 @@ class ExnessApiConnector:
 
         ok, data = self._request("DELETE", path, use_access_point=True)
         if ok:
+            self._cached_snapshot = None
             logger.info(f"[Exness API] Position #{ticket} fully closed.")
             return True
 

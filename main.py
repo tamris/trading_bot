@@ -193,16 +193,19 @@ class TradingBotApp:
                 await self.telegram.send_alert(f"⚠️ *Trading Halted:* {dd_msg}")
                 return
 
-            # Step 3: Iterate through symbols
+            # Step 3: Iterate through symbols (isolated per symbol so one error never aborts others)
             for symbol in settings.SYMBOLS:
-                await self._process_symbol(symbol)
+                try:
+                    await self._process_symbol(symbol)
+                except Exception as sym_err:
+                    logger.error(f"Error evaluating symbol {symbol}: {sym_err}", exc_info=True)
 
             logger.info(f"========== [PIPELINE CYCLE FINISHED] ==========\n")
 
             # Step 4: Periodic Scan Report to Telegram (Heartbeat)
             await self._check_and_send_periodic_report()
         except Exception as e:
-            logger.error(f"Error during pipeline cycle execution: {e}")
+            logger.error(f"Error during pipeline cycle execution: {e}", exc_info=True)
 
     async def _check_and_send_periodic_report(self):
         """Send periodic scan summary to Telegram based on configured frequency ('1h', '15m', or 'off')."""
@@ -379,21 +382,30 @@ class TradingBotApp:
             )
 
             # Step 2: Send Telegram Notification with Full AI Reasoning (Teknikal + Berita) & Score
-            try:
-                await self.telegram.send_trade_signal_alert(
-                    symbol=symbol,
-                    action=ai_decision.action,
-                    lot_size=lot_size,
-                    entry_price=fill_price,
-                    sl=tech_signal.sl_price,
-                    tp=tech_signal.tp_price,
-                    confluence_score=ai_decision.confluence_score,
-                    reasoning=ai_decision.reasoning,
-                    order_result=order_res,
-                    news_sentiment=getattr(ai_decision, "news_sentiment", "")
-                )
-            except Exception as tg_err:
-                logger.error(f"Failed to send trade signal alert: {tg_err}")
+            sent_ok = False
+            for tg_attempt in range(1, 3):
+                try:
+                    sent_ok = await self.telegram.send_trade_signal_alert(
+                        symbol=symbol,
+                        action=ai_decision.action,
+                        lot_size=lot_size,
+                        entry_price=fill_price,
+                        sl=tech_signal.sl_price,
+                        tp=tech_signal.tp_price,
+                        confluence_score=ai_decision.confluence_score,
+                        reasoning=ai_decision.reasoning,
+                        order_result=order_res,
+                        news_sentiment=getattr(ai_decision, "news_sentiment", "")
+                    )
+                    if sent_ok:
+                        break
+                    logger.warning(f"Telegram entry alert attempt {tg_attempt}/2 returned False for #{ticket}. Retrying...")
+                    await asyncio.sleep(3)
+                except Exception as tg_err:
+                    logger.error(f"Failed to send trade signal alert (attempt {tg_attempt}/2): {tg_err}")
+                    await asyncio.sleep(3)
+            if not sent_ok:
+                logger.error(f"Could not deliver Telegram entry alert for ticket #{ticket} after retries.")
         else:
             err_msg = order_res.get("error", "Unknown error")
             logger.warning(f"Order for {symbol} not executed: {err_msg}")

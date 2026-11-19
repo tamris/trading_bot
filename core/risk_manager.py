@@ -39,71 +39,85 @@ class RiskManager:
         # Daily Drawdown tracking (WIB)
         self._current_date: Optional[date] = None
         self._daily_starting_equity: float = 0.0
+        self._dd_pnl_offset: float = 0.0
 
         # Track tickets that have already taken Partial TP
         self._partial_closed_tickets: Set[int] = set()
 
     def initialize_daily_equity(self, current_equity: Optional[float] = None, force_reset: bool = False):
-        """Record the initial equity at the start of a trading day (00:00 WIB)."""
+        """Record the initial realized balance at the start of a trading day (00:00 WIB)."""
         wib = timezone(timedelta(hours=7))
         today_wib = datetime.now(wib).date()
-        if self._current_date != today_wib or self._daily_starting_equity <= 0 or force_reset:
+        is_new_day = self._current_date != today_wib
+        if is_new_day:
+            self._dd_pnl_offset = 0.0
+
+        if is_new_day or self._daily_starting_equity <= 0 or force_reset:
             if current_equity is None:
                 acc = self.mt5.get_account_info()
-                current_equity = acc.get("equity", 10000.0)
+                # Prefer realized balance so container restarts during floating profits never inflate baseline!
+                base_bal = float(acc.get("balance", acc.get("equity", 10000.0)))
+                if self.db and hasattr(self.db, "get_today_pnl") and not force_reset:
+                    today_closed = float(self.db.get_today_pnl())
+                    base_bal = max(base_bal - today_closed, 10.0)
+                current_equity = base_bal
 
             self._daily_starting_equity = float(current_equity)
             self._current_date = today_wib
-            logger.info(f"Daily starting equity initialized: ${self._daily_starting_equity:.2f} for date {today_wib} (WIB)")
+            logger.info(f"Daily starting balance initialized: ${self._daily_starting_equity:.2f} for date {today_wib} (WIB)")
 
     def reset_drawdown(self, new_equity: Optional[float] = None) -> float:
-        """Manually reset daily drawdown baseline to current balance/equity."""
+        """Manually reset daily drawdown baseline to current balance/equity (clears any halt)."""
+        acc = self.mt5.get_account_info()
         if new_equity is None:
-            acc = self.mt5.get_account_info()
-            new_equity = float(acc.get("equity", acc.get("balance", 100.0)))
+            new_equity = float(acc.get("balance", acc.get("equity", 100.0)))
+        if self.db and hasattr(self.db, "get_today_pnl"):
+            self._dd_pnl_offset = float(self.db.get_today_pnl())
         self.initialize_daily_equity(current_equity=new_equity, force_reset=True)
         return self._daily_starting_equity
 
     def check_daily_drawdown(self) -> Tuple[bool, float, str]:
         """
-        Check if today's drawdown exceeds the maximum allowed percentage.
-        Supports automatic detection of deposit/withdrawal so external cash flows don't trigger false drawdown halts.
+        Check if today's actual trading drawdown exceeds the maximum allowed percentage.
+        When SQLite DB is attached, calculates drawdown strictly from today's realized + floating
+        trading PnL, making it 100% immune to withdrawals, deposits, and restart floating-equity spikes.
         Returns (is_allowed, current_drawdown_pct, message).
         """
         self.initialize_daily_equity()
         acc = self.mt5.get_account_info()
-        current_equity = float(acc.get("equity", self._daily_starting_equity))
+        current_balance = float(acc.get("balance", self._daily_starting_equity))
+        current_equity = float(acc.get("equity", current_balance))
 
         if self._daily_starting_equity <= 0:
             return True, 0.0, "Starting equity not set"
 
-        # Calculate today's trading PnL if database is attached
-        today_trading_pnl = 0.0
-        has_db = False
         if self.db and hasattr(self.db, "get_today_pnl"):
-            has_db = True
-            today_closed_pnl = self.db.get_today_pnl()
-            floating_pnl = float(acc.get("profit", 0.0))
+            today_closed_pnl = float(self.db.get_today_pnl()) - self._dd_pnl_offset
+            floating_pnl = float(acc.get("profit", current_equity - current_balance))
             today_trading_pnl = today_closed_pnl + floating_pnl
 
-            # Detect deposit / withdrawal (external balance transfer):
-            # If the change in equity doesn't match trading PnL (e.g. user withdrew or deposited money),
-            # adjust the starting equity baseline to match the current equity.
-            expected_equity = self._daily_starting_equity + today_trading_pnl
-            diff = current_equity - expected_equity
-            if abs(diff) > 5.0:  # More than $5 difference not explained by trading PnL
-                action_str = "Deposit" if diff > 0 else "Penarikan Dana (Withdrawal)"
-                logger.info(
-                    f"[RiskManager] Terdeteksi {action_str} sebesar ${abs(diff):.2f}. "
-                    f"Menyesuaikan acuan saldo harian dari ${self._daily_starting_equity:.2f} menjadi ${current_equity:.2f}"
+            # Keep baseline synced to realized start-of-day balance
+            base_balance = max(current_balance - today_closed_pnl, current_balance, 10.0)
+            self._daily_starting_equity = base_balance
+
+            if today_trading_pnl >= 0.0:
+                return True, 0.0, f"Daily Drawdown OK: 0.00% (Profit Hari Ini: +${today_trading_pnl:.2f})"
+
+            drawdown_dollars = abs(today_trading_pnl)
+            drawdown_pct = (drawdown_dollars / base_balance) * 100.0
+
+            if drawdown_pct >= self.max_daily_drawdown_percent:
+                msg = (
+                    f"DAILY DRAWDOWN BREACHED: {drawdown_pct:.2f}% >= {self.max_daily_drawdown_percent}%. "
+                    f"Loss Hari Ini: -${drawdown_dollars:.2f} (Modal Acuan: ${base_balance:.2f}, Equity: ${current_equity:.2f}). "
+                    "Trading dihentikan sementara hingga 00:00 WIB (Ketik /resetdd untuk reset manual)."
                 )
-                self._daily_starting_equity = current_equity
+                logger.error(msg)
+                return False, drawdown_pct, msg
 
-        # If net trading PnL is positive or zero, drawdown is 0%
-        if has_db and today_trading_pnl >= 0.0:
-            return True, 0.0, f"Daily Drawdown OK: 0.00% (Profit Hari Ini: +${today_trading_pnl:.2f})"
+            return True, max(0.0, drawdown_pct), f"Daily Drawdown OK: {drawdown_pct:.2f}%"
 
-        # Otherwise calculate drawdown from baseline
+        # Fallback mode (no DB attached, e.g. unit tests)
         drawdown_dollars = self._daily_starting_equity - current_equity
         drawdown_pct = (drawdown_dollars / self._daily_starting_equity) * 100.0 if self._daily_starting_equity > 0 else 0.0
 
