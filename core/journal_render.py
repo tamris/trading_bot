@@ -116,7 +116,7 @@ def _pf_str(pf: Any) -> str:
 def render_dashboard(
     stats: Dict[str, Any],
     account: Optional[Dict[str, Any]] = None,
-    title: str = "AI TRADE  â€¢  TRADING JOURNAL",
+    title: str = "AI TRADE  \u2022  TRADING JOURNAL",
     period_label: str = "",
 ) -> bytes:
     fig = plt.figure(figsize=(16, 11.2), dpi=100, facecolor=BG)
@@ -127,7 +127,7 @@ def render_dashboard(
 
     now = datetime.now(WIB)
     fig.text(0.035, 0.955, title, fontsize=21, fontweight="bold", color=TEXT, va="center")
-    sub = f"{period_label}   â€¢   Dibuat {now.strftime('%d %b %Y %H:%M')} WIB"
+    sub = f"{period_label}   \u2022   Dibuat {now.strftime('%d %b %Y %H:%M')} WIB"
     fig.text(0.035, 0.925, sub, fontsize=10.5, color=MUTED, va="center")
     if account:
         bal = float(account.get("balance") or 0.0)
@@ -157,7 +157,7 @@ def render_dashboard(
          f"+${stats['avg_win']:,.2f} / -${stats['avg_loss']:,.2f}"),
         ("Expectancy", money(stats["expectancy"]), pnl_color(stats["expectancy"]), "Rata-rata P&L per trade"),
         ("Max Drawdown", f"-${stats['max_drawdown']:,.2f}", RED if stats["max_drawdown"] > 0 else MUTED,
-         f"Streak terbaik {stats['max_win_streak']}W  â€¢  terburuk {stats['max_loss_streak']}L"),
+         f"Streak terbaik {stats['max_win_streak']}W  \u2022  terburuk {stats['max_loss_streak']}L"),
     ]
     for i, (label, value, color, foot) in enumerate(kpis):
         ax = fig.add_subplot(gs[0, i * 2:(i + 1) * 2])
@@ -350,7 +350,7 @@ def render_calendar(daily: Dict[date, Dict[str, Any]], year: int, month: int) ->
     ax.set_ylim(-(n_weeks * ch) - 0.05, header_h + 0.05)
 
     # Title + month stats
-    fig.text(0.03, 0.95, f"Kalender P&L  â€¢  {MONTHS_ID[month - 1]} {year}", fontsize=21, fontweight="bold", color=TEXT, va="center")
+    fig.text(0.03, 0.95, f"Kalender P&L  \u2022  {MONTHS_ID[month - 1]} {year}", fontsize=21, fontweight="bold", color=TEXT, va="center")
     wr = (ms["wins"] / (ms["wins"] + ms["losses"]) * 100.0) if (ms["wins"] + ms["losses"]) else 0.0
     summary = [
         ("NET BULAN INI", money(ms["net"]), pnl_color(ms["net"])),
@@ -418,7 +418,7 @@ def render_calendar(daily: Dict[date, Dict[str, Any]], year: int, month: int) ->
                 v = info["pnl"]
                 ax.text(x0 + 0.5, y0 + 0.5, money(v), ha="center", va="center", fontsize=14.5,
                         fontweight="bold", color=(TEXT if abs(v) > BEP_THRESHOLD else MUTED))
-                detail = f"{info['trades']} trade  â€¢  {info['wins']}W {info['losses']}L"
+                detail = f"{info['trades']} trade  \u2022  {info['wins']}W {info['losses']}L"
                 if info["beps"]:
                     detail += f" {info['beps']}BE"
                 ax.text(x0 + 0.5, y0 + 0.2, detail, ha="center", va="center", fontsize=8, color=TEXT, alpha=0.85)
@@ -465,7 +465,7 @@ def render_trade_log(trades: List[JournalTrade], limit: int = 15) -> bytes:
     )[:limit]
     n = max(len(rows), 1)
     fig = plt.figure(figsize=(16, 1.55 + 0.46 * (n + 1)), dpi=100, facecolor=BG)
-    fig.text(0.03, 1 - 0.5 / fig.get_figheight(), f"Trade Log  â€¢  {len(rows)} transaksi terakhir",
+    fig.text(0.03, 1 - 0.5 / fig.get_figheight(), f"Trade Log  \u2022  {len(rows)} transaksi terakhir",
              fontsize=19, fontweight="bold", color=TEXT, va="center")
     ax = fig.add_axes([0.03, 0.02, 0.94, 1 - 1.05 / fig.get_figheight()])
     ax.axis("off")
