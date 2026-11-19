@@ -54,7 +54,6 @@ REPLY_KEYBOARD = ReplyKeyboardMarkup(
     [
         [KeyboardButton("📊 Status Akun"), KeyboardButton("📜 Riwayat Trade")],
         [KeyboardButton("📔 Jurnal Trading"), KeyboardButton("📅 Kalender PnL")],
-        [KeyboardButton("📊 Chart Performa"), KeyboardButton("📥 Export Excel")],
         [KeyboardButton("🔍 Radar Pasar"), KeyboardButton("🕒 Sesi Pasar")],
         [KeyboardButton("⏸️ Pause Bot"), KeyboardButton("▶️ Resume Bot")],
         [KeyboardButton("🚨 Tutup Semua (Panic)")]
@@ -521,10 +520,10 @@ class TelegramBotManager:
         help_text = (
             "ℹ️ *Panduan Perintah Bot Trading:*\n\n"
             "• `/status` atau tombol *📊 Status Akun* - Cek saldo, equity, posisi yang sedang terbuka & drawdown.\n"
-            "• `/journal` atau tombol *📔 Jurnal Trading* - Dashboard visual analitik performa lengkap.\n"
+            "• `/journal` atau tombol *📔 Jurnal Trading* - Dashboard visual performa, chart equity & tombol download Excel/CSV.\n"
             "• `/calendar` atau tombol *📅 Kalender PnL* - Kalender visual PnL harian (kotak hijau/merah per hari & mingguan).\n"
-            "• `/chart` atau tombol *📊 Chart Performa* - Grafik kurva ekuitas, drawdown, bar harian & komposisi hasil.\n"
-            "• `/excel` atau tombol *📥 Export Excel* - Download file Excel (.xlsx) rapi lengkap 3 sheet (KPI, Kalender, Log Trade).\n"
+            "• `/chart` - Pintasan langsung grafik kurva ekuitas, drawdown, & komposisi hasil.\n"
+            "• `/excel` - Download langsung file Excel (.xlsx) rapi lengkap 3 sheet (KPI, Kalender, Log Trade).\n"
             "• `/eval` - Evaluasi mendalam jurnal & kinerja trading oleh Gemini AI.\n"
             "• `/history` atau tombol *📜 Riwayat Trade* - Lihat daftar 5 riwayat trade terakhir (SQLite).\n"
             "• `/sesi` atau tombol *🕒 Sesi Pasar* - Cek sesi pasar aktif saat ini & status izin tiap pair (WIB).\n"
