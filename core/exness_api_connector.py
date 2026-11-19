@@ -41,6 +41,7 @@ class ExnessApiConnector:
         self._min_interval: float = 0.55  # 550ms ensures max ~1.8 req/sec, strictly below Exness 2 req/sec limit
         self._cached_snapshot: Optional[Dict[str, Any]] = None
         self._cached_snapshot_time: float = 0.0
+        self.last_snapshot_ok: bool = True
         self._price_cache: Dict[str, Dict[str, Any]] = {}
 
     def _load_key(self) -> None:
@@ -167,13 +168,17 @@ class ExnessApiConnector:
         """Fetch trading state snapshot with in-memory caching to respect 2 req/sec limit."""
         now = time.time()
         if self._cached_snapshot and (now - self._cached_snapshot_time < max_age_seconds):
+            self.last_snapshot_ok = True
             return True, self._cached_snapshot
 
         path = f"/v1/trading/accounts/{self.account_id}/snapshot"
         ok, data = self._request("GET", path, use_access_point=True)
-        if ok and "account_state" in data:
+        if ok and isinstance(data, dict) and "account_state" in data:
             self._cached_snapshot = data
             self._cached_snapshot_time = now
+            self.last_snapshot_ok = True
+        else:
+            self.last_snapshot_ok = False
         return ok, data
 
     def _load_cached_access_point(self) -> Optional[str]:
@@ -802,7 +807,8 @@ class ExnessApiConnector:
 
         close_deals = [d for d in matching_deals if d.get("type") in ("close", "out", "DEAL_ENTRY_OUT")]
         if not close_deals:
-            close_deals = matching_deals[-1:]
+            # Position has NO close deal yet (still open or history not settled) -> never pretend open deal is a BEP close!
+            return None
 
         final_deal = close_deals[-1]
         exit_price = float(final_deal.get("price", 0.0))

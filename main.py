@@ -486,22 +486,29 @@ class TradingBotApp:
                         ai_reasoning="Active position synced from broker",
                         entry_alert_sent=1
                     )
+                elif existing.get("status") != "OPEN":
+                    # Restore trade if it was prematurely marked closed due to a prior transient API glitch
+                    self.db.reopen_trade(t)
 
             # 4. Check for closed trades from SQLite tracked trades
+            # Guard: NEVER assume positions closed if the broker snapshot failed (e.g. HTTP 429 / timeout)!
+            if getattr(self.mt5, "last_snapshot_ok", True) is False:
+                logger.warning("Skipping closed-trade detection on this tick: broker snapshot was unavailable.")
+                return
+
             open_db_trades = self.db.get_open_trades()
             for trade in open_db_trades:
                 ticket = trade["ticket"]
                 if ticket not in active_tickets:
-                    # Position is no longer in open list -> It closed!
+                    # Verify with broker deal history that a real CLOSE deal exists before alerting
                     deal_info = self.mt5.get_closed_deal_info(ticket)
-                    if deal_info:
-                        close_price = deal_info["price"]
-                        pnl = deal_info["profit"]
-                        reason = deal_info["reason"]
-                    else:
-                        close_price = trade["tp_price"]
-                        pnl = 0.0
-                        reason = "CLOSED"
+                    if not deal_info:
+                        logger.info(f"Ticket #{ticket} not in snapshot yet no close deal confirmed in history; waiting next tick.")
+                        continue
+
+                    close_price = deal_info["price"]
+                    pnl = deal_info["profit"]
+                    reason = deal_info["reason"]
 
                     close_time_wib = get_wib_str()
                     self.db.record_close(

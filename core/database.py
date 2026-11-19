@@ -258,6 +258,28 @@ class TradeDatabase:
             logger.error(f"[DB] Error recording trade close #{ticket}: {e}")
             return False
 
+    def reopen_trade(self, ticket: int) -> bool:
+        """Restore a trade back to OPEN if broker confirms the position is still active."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    UPDATE trades
+                    SET status = 'OPEN',
+                        close_price = NULL,
+                        close_time = NULL,
+                        close_reason = NULL,
+                        close_alert_sent = 0
+                    WHERE ticket = ? AND status != 'OPEN'
+                """, (ticket,))
+                conn.commit()
+                if cursor.rowcount > 0:
+                    logger.warning(f"[DB] Trade #{ticket} restored to OPEN (confirmed still active on broker).")
+                return cursor.rowcount > 0
+        except Exception as e:
+            logger.error(f"[DB] Error reopening trade #{ticket}: {e}")
+            return False
+
     def update_sl(self, ticket: int, new_sl: float) -> bool:
         """Update Stop Loss of a trade in database (e.g., Trailing Break-Even)."""
         try:
