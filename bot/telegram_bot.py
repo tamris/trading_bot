@@ -292,7 +292,8 @@ class TelegramBotManager:
         tp: float,
         confluence_score: int,
         reasoning: str,
-        order_result: Dict[str, Any]
+        order_result: Dict[str, Any],
+        news_sentiment: str = ""
     ) -> bool:
         """Format and broadcast detailed trade execution report in WIB."""
         try:
@@ -317,6 +318,7 @@ class TelegramBotManager:
             lot_val = float(lot_size or 0.01)
 
             dec = 3 if "JPY" in symbol else (2 if ("BTC" in symbol or "XAU" in symbol) else 5)
+            sentiment_str = f"• *Sentimen Berita:* `{news_sentiment}`\n" if news_sentiment else ""
 
             msg = (
                 f"{status_icon} *ORDER EKSEKUSI BARU (ENTRY)*\n\n"
@@ -327,6 +329,7 @@ class TelegramBotManager:
                 f"• *Stop Loss:* `{sl_val:.{dec}f}`\n"
                 f"• *Take Profit:* `{tp_val:.{dec}f}`\n"
                 f"• *Skor Konfluensi:* `{confluence_score}/100`\n"
+                f"{sentiment_str}"
                 f"• *Waktu Entry:* `{wib_time}`\n"
                 f"• *Status Broker:* {order_status}\n\n"
                 f"🧠 *Analisa AI:*\n{clean_reasoning}\n"

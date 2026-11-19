@@ -262,42 +262,6 @@ class TradingBotApp:
         lines.append("💡 _Gunakan tombol '🔍 Radar Pasar' kapan saja untuk cek instan._")
         return "\n".join(lines)
 
-    async def _build_informative_sync_reasoning(
-        self,
-        symbol: str,
-        action: str,
-        price: float,
-        sl: float,
-        tp: float
-    ) -> Tuple[int, str]:
-        """
-        Generate a detailed, informative technical setup rationale for an active trade synced from broker.
-        Avoids generic or dummy placeholder text.
-        """
-        dec = 3 if "JPY" in symbol else (2 if ("BTC" in symbol or "XAU" in symbol) else 5)
-        try:
-            df_m15 = self.mt5.fetch_rates(symbol, "M15", 200)
-            df_h1 = self.mt5.fetch_rates(symbol, "H1", 200)
-            if not df_m15.empty and len(df_m15) >= 50:
-                sig = self.technical_engine.evaluate_setup(symbol, df_m15, df_h1)
-                rsi_val = f"{sig.rsi:.1f}" if sig.rsi > 0 else "45.0"
-                ema50 = f"{sig.ema50:.{dec}f}"
-                ema200 = f"{sig.ema200:.{dec}f}"
-                bias = "Bearish" if action.upper() == "SELL" else "Bullish"
-                act_str = action.upper()
-                return 88, (
-                    f"Setup teknikal {act_str} terkonfirmasi aktif pada M15. Struktur tren {bias} "
-                    f"dengan acuan EMA50 ({ema50}), EMA200 ({ema200}), dan momentum RSI di level {rsi_val}. "
-                    f"Target Take Profit terpasang di {float(tp):.{dec}f} dan proteksi Stop Loss di {float(sl):.{dec}f}."
-                )
-        except Exception as e:
-            logger.warning(f"Could not calculate technical setup for sync alert: {e}")
-
-        return 85, (
-            f"Posisi {action.upper()} tervalidasi aktif berjalan di akun live Exness. "
-            f"Eksekusi terkonfirmasi dengan target Take Profit di {float(tp):.{dec}f} dan proteksi Stop Loss di {float(sl):.{dec}f}."
-        )
-
     async def _process_symbol(self, symbol: str):
         """Process analysis and execution pipeline for a single instrument."""
         logger.info(f"Evaluating {symbol}...")
@@ -399,24 +363,8 @@ class TradingBotApp:
             fill_price = float(order_res.get("price") or tech_signal.entry_price)
             self.trading_state["last_scan_reasons"][symbol] = f"EXECUTED: {ai_decision.action} {lot_size} Lot @ {fill_price}"
 
-            # 9. Telegram Notification with Full AI Reasoning & Score
-            sent_ok = False
-            try:
-                sent_ok = await self.telegram.send_trade_signal_alert(
-                    symbol=symbol,
-                    action=ai_decision.action,
-                    lot_size=lot_size,
-                    entry_price=fill_price,
-                    sl=tech_signal.sl_price,
-                    tp=tech_signal.tp_price,
-                    confluence_score=ai_decision.confluence_score,
-                    reasoning=ai_decision.reasoning,
-                    order_result=order_res
-                )
-            except Exception as tg_err:
-                logger.error(f"Failed to send trade signal alert: {tg_err}")
-
-            # Save to SQLite with entry_alert_sent marked True so background sync monitor won't race/duplicate
+            # Step 1: Save IMMEDIATELY to SQLite with full Gemini AI reasoning & news sentiment
+            # Mark entry_alert_sent=1 right away to prevent background sync monitor from racing/overwriting
             self.db.record_entry(
                 ticket=ticket,
                 symbol=symbol,
@@ -427,8 +375,25 @@ class TradingBotApp:
                 tp_price=tech_signal.tp_price,
                 confluence_score=ai_decision.confluence_score,
                 ai_reasoning=ai_decision.reasoning,
-                entry_alert_sent=1 if sent_ok else 0
+                entry_alert_sent=1
             )
+
+            # Step 2: Send Telegram Notification with Full AI Reasoning (Teknikal + Berita) & Score
+            try:
+                await self.telegram.send_trade_signal_alert(
+                    symbol=symbol,
+                    action=ai_decision.action,
+                    lot_size=lot_size,
+                    entry_price=fill_price,
+                    sl=tech_signal.sl_price,
+                    tp=tech_signal.tp_price,
+                    confluence_score=ai_decision.confluence_score,
+                    reasoning=ai_decision.reasoning,
+                    order_result=order_res,
+                    news_sentiment=getattr(ai_decision, "news_sentiment", "")
+                )
+            except Exception as tg_err:
+                logger.error(f"Failed to send trade signal alert: {tg_err}")
         else:
             err_msg = order_res.get("error", "Unknown error")
             logger.warning(f"Order for {symbol} not executed: {err_msg}")
@@ -486,7 +451,7 @@ class TradingBotApp:
                         msg = f"🛡️ *Break-Even Aktif (WIB):* Stop Loss dipindahkan ke harga Entry (`{entry_p}`) untuk Tiket `#{t}`."
                         await self.telegram.send_alert(msg)
 
-            # 3. Synchronize any active broker positions into SQLite if missing & alert if not sent
+            # 3. Synchronize any active broker positions into SQLite if missing
             current_mt5_positions = self.mt5.get_open_positions()
             active_tickets = {p["ticket"] for p in current_mt5_positions}
 
@@ -494,27 +459,9 @@ class TradingBotApp:
                 t = p["ticket"]
                 existing = self.db.get_trade_by_ticket(t)
 
-                if existing:
-                    # Trade exists in database: use its authentic recorded reasoning and score
-                    ai_score = existing.get("confluence_score") or 85
-                    ai_reason = existing.get("ai_reasoning") or ""
-                    if not ai_reason or "synced from broker" in ai_reason.lower():
-                        ai_score, ai_reason = await self._build_informative_sync_reasoning(
-                            symbol=p["symbol"],
-                            action=p["type"],
-                            price=p["price_open"],
-                            sl=p.get("sl", 0.0),
-                            tp=p.get("tp", 0.0)
-                        )
-                else:
-                    # Position discovered on broker (e.g. after container restart or sync)
-                    ai_score, ai_reason = await self._build_informative_sync_reasoning(
-                        symbol=p["symbol"],
-                        action=p["type"],
-                        price=p["price_open"],
-                        sl=p.get("sl", 0.0),
-                        tp=p.get("tp", 0.0)
-                    )
+                if not existing:
+                    # Position discovered on broker (e.g. manual order or orphan sync)
+                    # Record silently with entry_alert_sent=1 so break-even monitor can track it without spamming entry alerts
                     self.db.record_entry(
                         ticket=t,
                         symbol=p["symbol"],
@@ -523,29 +470,10 @@ class TradingBotApp:
                         entry_price=p["price_open"],
                         sl_price=p["sl"],
                         tp_price=p["tp"],
-                        confluence_score=ai_score,
-                        ai_reasoning=ai_reason,
-                        entry_alert_sent=0
+                        confluence_score=85,
+                        ai_reasoning="Active position synced from broker",
+                        entry_alert_sent=1
                     )
-
-                # Send informative entry alert only if not sent yet
-                if not self.db.is_entry_alert_sent(t):
-                    try:
-                        sent_ok = await self.telegram.send_trade_signal_alert(
-                            symbol=p["symbol"],
-                            action=p["type"],
-                            lot_size=p["volume"],
-                            entry_price=p["price_open"],
-                            sl=p["sl"],
-                            tp=p["tp"],
-                            confluence_score=ai_score,
-                            reasoning=ai_reason,
-                            order_result={"success": True, "ticket": t}
-                        )
-                        if sent_ok:
-                            self.db.mark_entry_alert_sent(t)
-                    except Exception as e:
-                        logger.error(f"Error alerting active trade #{t}: {e}")
 
             # 4. Check for closed trades from SQLite tracked trades
             open_db_trades = self.db.get_open_trades()

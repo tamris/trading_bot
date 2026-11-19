@@ -360,7 +360,10 @@ ATURAN KONFLUENSI:
    - Skor < 60: Sentimen makro bertolak belakang dengan setup teknikal (risiko jebakan tinggi).
    Catatan: Hitung skor secara dinamis dan presisi (contoh: 81, 83, 86, 88, 91, 93), HINDARI selalu mengeluarkan angka 85 secara statis.
 6. Nilai 'action' HARUS salah satu dari: BUY, SELL, atau HOLD.
-7. Berikan 'reasoning' singkat dan logis dalam bahasa Indonesia.
+7. Berikan 'reasoning' dalam bahasa Indonesia yang komprehensif dan jelas, WAJIB memuat DUA aspek:
+   - Alasan Berita/Makro: Sebutkan sentimen atau topik berita terkini yang relevan (misal: penguatan/pelemahan Dolar, inflasi, suku bunga, risk-on/risk-off crypto, geopolitik).
+   - Alasan Teknikal: Hubungkan dengan posisi harga terhadap EMA50, EMA200, atau RSI.
+   Contoh: "Pelemahan Dolar AS akibat data inflasi yang melandai dan sentimen dovish The Fed memberikan dorongan kuat bagi Emas, selaras dengan pantulan harga XAUUSD di atas EMA50 dan momentum RSI yang sehat."
 
 Keluarkan respon HANYA dalam format JSON valid sesuai schema.
 """
@@ -376,18 +379,18 @@ Keluarkan respon HANYA dalam format JSON valid sesuai schema.
         if "JPY" in sym_upper:
             bias_buy = "BULLISH_USD"
             bias_sell = "BEARISH_USD"
-            reason_buy = f"Sentimen penguatan Dolar AS dan selisih yield obligasi selaras dengan pantulan teknikal {tech_signal.symbol}."
-            reason_sell = f"Sentimen pelemahan Dolar AS dan antisipasi intervensi Yen selaras dengan penolakan harga {tech_signal.symbol}."
+            reason_buy = f"Sentimen penguatan Dolar AS (yield Treasury naik) selaras dengan pantulan teknikal {tech_signal.symbol} di atas EMA50."
+            reason_sell = f"Sentimen pelemahan Dolar AS dan antisipasi intervensi Yen selaras dengan penolakan teknikal {tech_signal.symbol} di bawah EMA200."
         elif "BTC" in sym_upper:
             bias_buy = "RISK_ON"
             bias_sell = "RISK_OFF"
-            reason_buy = f"Sentimen risk-on global dan aliran modal positif selaras dengan penembusan teknikal {tech_signal.symbol} di atas EMA 200."
-            reason_sell = f"Tekanan jual makro dan sentimen kehati-hatian investor selaras dengan struktur bearish {tech_signal.symbol}."
+            reason_buy = f"Sentimen risk-on global dan aliran dana positif crypto selaras dengan penembusan teknikal {tech_signal.symbol} di atas EMA50."
+            reason_sell = f"Sentimen risk-off pasar dan kehati-hatian likuiditas makro selaras dengan struktur tren bearish {tech_signal.symbol} di bawah EMA200."
         else:
             bias_buy = "BEARISH_USD"
             bias_sell = "BULLISH_USD"
-            reason_buy = f"Sentimen pelemahan USD selaras dengan pantulan harga {tech_signal.symbol} di atas EMA 200 dan dukungan RSI {tech_signal.rsi:.1f}."
-            reason_sell = f"Penguatan indeks Dolar AS selaras dengan penolakan harga {tech_signal.symbol} di bawah EMA 200 dan tekanan jual teknikal."
+            reason_buy = f"Sentimen pelemahan Dolar AS di pasar makro mendukung kenaikan {tech_signal.symbol}, terkonfirmasi oleh pantulan harga di atas EMA50 dan RSI {tech_signal.rsi:.1f}."
+            reason_sell = f"Sentimen penguatan Dolar AS mendominasi pasar mata uang, menekan harga {tech_signal.symbol} di bawah EMA200 dengan konfirmasi momentum bearish RSI {tech_signal.rsi:.1f}."
 
         if tech_signal.action == "BUY":
             return GeminiTradingDecision(
