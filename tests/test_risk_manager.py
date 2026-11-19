@@ -220,3 +220,46 @@ def test_bep_database_persistence(tmp_path):
     # Re-open DB instance (simulating app restart)
     db2 = TradeDatabase(str(db_file))
     assert db2.is_bep_alert_sent(999999) is True
+
+
+def test_journal_metrics_and_csv_export(tmp_path):
+    from core.database import TradeDatabase
+    db_file = tmp_path / "journal_test.db"
+    db = TradeDatabase(str(db_file))
+
+    # 1. Add Win trade
+    db.record_entry(ticket=1, symbol="XAUUSD", action="BUY", lot=0.01, entry_price=2650.0, sl_price=2640.0, tp_price=2670.0, ai_reasoning="Gold trend")
+    db.record_close(ticket=1, close_price=2670.0, profit_loss=20.0, close_reason="TAKE_PROFIT")
+
+    # 2. Add Loss trade
+    db.record_entry(ticket=2, symbol="BTCUSD", action="SELL", lot=0.01, entry_price=64000.0, sl_price=64500.0, tp_price=63000.0, ai_reasoning="Crypto short")
+    db.record_close(ticket=2, close_price=64500.0, profit_loss=-5.0, close_reason="STOP_LOSS")
+
+    # 3. Add BEP trade
+    db.record_entry(ticket=3, symbol="EURUSD", action="BUY", lot=0.01, entry_price=1.0850, sl_price=1.0800, tp_price=1.0950, ai_reasoning="Euro long")
+    db.record_close(ticket=3, close_price=1.0850, profit_loss=0.0, close_reason="BREAK_EVEN")
+
+    # 4. Add Open trade
+    db.record_entry(ticket=4, symbol="USDJPY", action="BUY", lot=0.01, entry_price=155.0, sl_price=154.5, tp_price=156.0, ai_reasoning="JPY breakout")
+
+    metrics = db.get_detailed_journal_metrics()
+    assert metrics["total_closed"] == 3
+    assert metrics["open_trades"] == 1
+    assert metrics["wins"] == 1
+    assert metrics["losses"] == 1
+    assert metrics["beps"] == 1
+    assert metrics["adjusted_win_rate"] == 50.0
+    assert metrics["capital_preserved_rate"] == pytest.approx(66.7, abs=1e-1)
+    assert metrics["net_pnl"] == 15.0
+    assert metrics["gross_profit"] == 20.0
+    assert metrics["gross_loss"] == 5.0
+    assert metrics["profit_factor"] == 4.0
+    assert "XAUUSD" in metrics["by_symbol"]
+    assert metrics["by_symbol"]["XAUUSD"]["wins"] == 1
+
+    # Check CSV export
+    csv_str = db.export_trades_to_csv()
+    assert "Tiket,Waktu Entry (WIB)" in csv_str
+    assert "XAUUSD" in csv_str
+    assert "TAKE_PROFIT" in csv_str
+    assert "Gold trend" in csv_str

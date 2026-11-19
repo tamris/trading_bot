@@ -400,6 +400,148 @@ class TradeDatabase:
                 "open_trades": open_cnt
             }
 
+    def get_all_journal_trades(self, limit: int = 500) -> List[Dict[str, Any]]:
+        """Fetch all trades sorted by ticket descending for journal views."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM trades ORDER BY ticket DESC LIMIT ?", (limit,))
+            return [dict(row) for row in cursor.fetchall()]
+
+    def get_detailed_journal_metrics(self) -> Dict[str, Any]:
+        """Compute advanced trading journal metrics (win rate, profit factor, R:R, and pair breakdowns)."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM trades WHERE status = 'CLOSED'")
+            closed_trades = [dict(r) for r in cursor.fetchall()]
+
+            cursor.execute("SELECT COUNT(*) as open_cnt FROM trades WHERE status = 'OPEN'")
+            open_cnt = cursor.fetchone()["open_cnt"]
+
+        total_closed = len(closed_trades)
+        wins = [t for t in closed_trades if float(t.get("profit_loss") or 0.0) > 0.05]
+        beps = [t for t in closed_trades if abs(float(t.get("profit_loss") or 0.0)) <= 0.05]
+        losses = [t for t in closed_trades if float(t.get("profit_loss") or 0.0) < -0.05]
+
+        gross_profit = sum(float(t.get("profit_loss") or 0.0) for t in wins)
+        gross_loss = sum(abs(float(t.get("profit_loss") or 0.0)) for t in losses)
+        net_pnl = gross_profit - gross_loss
+
+        win_rate = (len(wins) / total_closed * 100.0) if total_closed > 0 else 0.0
+        adjusted_win_rate = (len(wins) / (len(wins) + len(losses)) * 100.0) if (len(wins) + len(losses)) > 0 else 0.0
+        capital_preserved_rate = ((len(wins) + len(beps)) / total_closed * 100.0) if total_closed > 0 else 0.0
+
+        profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else (99.9 if gross_profit > 0 else 0.0)
+        avg_win = (gross_profit / len(wins)) if wins else 0.0
+        avg_loss = (gross_loss / len(losses)) if losses else 0.0
+        rr_ratio = (avg_win / avg_loss) if avg_loss > 0 else 0.0
+
+        pnl_values = [float(t.get("profit_loss") or 0.0) for t in closed_trades]
+        best_trade = max(pnl_values) if pnl_values else 0.0
+        worst_trade = min(pnl_values) if pnl_values else 0.0
+
+        # Breakdown by symbol
+        by_symbol: Dict[str, Dict[str, Any]] = {}
+        for t in closed_trades:
+            sym = t.get("symbol", "UNKNOWN")
+            if sym not in by_symbol:
+                by_symbol[sym] = {"total": 0, "wins": 0, "beps": 0, "losses": 0, "pnl": 0.0}
+            pnl = float(t.get("profit_loss") or 0.0)
+            by_symbol[sym]["total"] += 1
+            by_symbol[sym]["pnl"] += pnl
+            if pnl > 0.05:
+                by_symbol[sym]["wins"] += 1
+            elif abs(pnl) <= 0.05:
+                by_symbol[sym]["beps"] += 1
+            else:
+                by_symbol[sym]["losses"] += 1
+
+        for sym, sdata in by_symbol.items():
+            wl = sdata["wins"] + sdata["losses"]
+            sdata["win_rate"] = (sdata["wins"] / wl * 100.0) if wl > 0 else (100.0 if sdata["beps"] > 0 else 0.0)
+            sdata["pnl"] = round(sdata["pnl"], 2)
+
+        return {
+            "total_closed": total_closed,
+            "open_trades": open_cnt,
+            "wins": len(wins),
+            "beps": len(beps),
+            "losses": len(losses),
+            "win_rate": round(win_rate, 1),
+            "adjusted_win_rate": round(adjusted_win_rate, 1),
+            "capital_preserved_rate": round(capital_preserved_rate, 1),
+            "gross_profit": round(gross_profit, 2),
+            "gross_loss": round(gross_loss, 2),
+            "net_pnl": round(net_pnl, 2),
+            "profit_factor": round(profit_factor, 2),
+            "avg_win": round(avg_win, 2),
+            "avg_loss": round(avg_loss, 2),
+            "risk_reward_ratio": round(rr_ratio, 2),
+            "best_trade": round(best_trade, 2),
+            "worst_trade": round(worst_trade, 2),
+            "by_symbol": by_symbol
+        }
+
+    def export_trades_to_csv(self) -> str:
+        """Export all trades into CSV format suitable for Excel, Google Sheets, or Notion."""
+        import csv
+        import io
+
+        trades = self.get_all_journal_trades(limit=1000)
+        output = io.StringIO()
+        writer = csv.writer(output, quoting=csv.QUOTE_MINIMAL)
+
+        writer.writerow([
+            "Tiket",
+            "Waktu Entry (WIB)",
+            "Waktu Exit (WIB)",
+            "Pair",
+            "Posisi",
+            "Volume (Lot)",
+            "Harga Entry",
+            "Harga Exit",
+            "Stop Loss (SL)",
+            "Take Profit (TP)",
+            "PnL Bersih ($)",
+            "Hasil Trade",
+            "Status",
+            "Alasan Exit",
+            "Skor Konfluensi AI",
+            "Analisa AI & Alasan Entry"
+        ])
+
+        for t in trades:
+            status = str(t.get("status") or "OPEN").upper()
+            pnl = float(t.get("profit_loss") or 0.0)
+            if status == "OPEN":
+                outcome = "OPEN"
+            elif pnl > 0.05:
+                outcome = "WIN (TP)"
+            elif abs(pnl) <= 0.05:
+                outcome = "BEP (Break-Even)"
+            else:
+                outcome = "LOSS (SL)"
+
+            writer.writerow([
+                t.get("ticket"),
+                t.get("entry_time", ""),
+                t.get("close_time", "") or "-",
+                t.get("symbol", ""),
+                t.get("action", ""),
+                f"{float(t.get('lot') or 0.01):.2f}",
+                f"{float(t.get('entry_price') or 0.0):.5f}".rstrip("0").rstrip("."),
+                (f"{float(t.get('close_price') or 0.0):.5f}".rstrip("0").rstrip(".")) if t.get("close_price") else "-",
+                f"{float(t.get('sl_price') or 0.0):.5f}".rstrip("0").rstrip("."),
+                f"{float(t.get('tp_price') or 0.0):.5f}".rstrip("0").rstrip("."),
+                f"{pnl:.2f}",
+                outcome,
+                status,
+                t.get("close_reason", "") or "-",
+                t.get("confluence_score", 0),
+                t.get("ai_reasoning", "")
+            ])
+
+        return output.getvalue()
+
     def get_today_pnl(self, date_prefix: Optional[str] = None) -> float:
         """Calculate sum of closed trade PnL for today (WIB date string, e.g. '2026-11-18')."""
         if not date_prefix:

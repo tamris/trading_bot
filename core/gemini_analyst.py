@@ -419,3 +419,92 @@ Keluarkan respon HANYA dalam format JSON valid sesuai schema.
                 action="HOLD",
                 reasoning="Kondisi pasar saat ini berada dalam fase konsolidasi tanpa konfluensi arah yang jelas."
             )
+
+    def evaluate_journal(
+        self,
+        metrics: Dict[str, Any],
+        recent_trades: List[Dict[str, Any]]
+    ) -> str:
+        """
+        Produce a professional quantitative hedge-fund style trading evaluation
+        reviewing performance metrics, win/loss patterns, and giving actionable recommendations.
+        """
+        total_closed = metrics.get("total_closed", 0)
+        if total_closed == 0:
+            return "Belum ada riwayat transaksi yang selesai untuk dianalisis oleh AI."
+
+        trades_summary = []
+        for t in recent_trades[:10]:
+            outcome = "WIN" if float(t.get("profit_loss") or 0.0) > 0.05 else ("BEP" if abs(float(t.get("profit_loss") or 0.0)) <= 0.05 else "LOSS")
+            trades_summary.append(
+                f"- #{t.get('ticket')} {t.get('symbol')} {t.get('action')}: PnL=${float(t.get('profit_loss') or 0.0):.2f} "
+                f"({outcome}) Exit:{t.get('close_reason')} Alasan:{str(t.get('ai_reasoning') or '')[:80]}"
+            )
+        trades_text = "\n".join(trades_summary)
+
+        by_sym = metrics.get("by_symbol", {})
+        pair_text = ", ".join([f"{k}: {v['wins']}W/{v['losses']}L (PnL ${v['pnl']})" for k, v in by_sym.items()])
+
+        prompt = f"""
+Anda adalah Senior Hedge Fund Risk Officer & Quantitative Trading Mentor.
+Tugas Anda: Berikan evaluasi performa jurnal trading yang objektif, kritis, dan solutif berdasarkan data riwayat transaksi bot trading berikut:
+
+METRIK PERFORMA:
+- Total Trade Selesai: {total_closed}
+- Menang: {metrics.get('wins', 0)} | Kalah: {metrics.get('losses', 0)} | Break-Even (Modal Aman): {metrics.get('beps', 0)}
+- Real Win Rate: {metrics.get('adjusted_win_rate', 0.0)}%
+- Capital Preservation Rate: {metrics.get('capital_preserved_rate', 0.0)}%
+- Net Profit: ${metrics.get('net_pnl', 0.0):.2f} (Gross Profit: ${metrics.get('gross_profit', 0.0):.2f}, Gross Loss: ${metrics.get('gross_loss', 0.0):.2f})
+- Profit Factor: {metrics.get('profit_factor', 0.0)}
+- Risk-Reward Ratio (R:R): {metrics.get('risk_reward_ratio', 0.0)}
+- Rata-rata Win: ${metrics.get('avg_win', 0.0):.2f} | Rata-rata Loss: ${metrics.get('avg_loss', 0.0):.2f}
+- Performa per Pair: {pair_text}
+
+SAMPEL TRANSAKSI TERAKHIR:
+{trades_text}
+
+Format Jawaban (Bahasa Indonesia, gunakan bullet points ringkas dan emoji profesional):
+1. 🎯 **Poin Keunggulan (Apa yang Berjalan Baik):** Evaluasi kedisiplinan TP, BEP, dan win rate.
+2. ⚠️ **Area Perbaikan & Pola Loss (Penyebab Minus):** Analisis pair atau kondisi pasar mana yang menyebabkan loss.
+3. 💡 **Rekomendasi Taktis Sesi Berikutnya:** Saran konkret (misal: penyesuaian lot, filter volatilitas sesi, atau trailing stop).
+
+Tulis jawaban yang padat, berbobot, dan langsung to the point tanpa basa-basi pembuka yang panjang.
+"""
+        # Try Gemini API key pool
+        for key_info in self._pool:
+            if not key_info.is_available():
+                continue
+            try:
+                response = key_info.client.models.generate_content(
+                    model=settings.GEMINI_MODEL,
+                    contents=prompt
+                )
+                if response and response.text:
+                    key_info.record_success()
+                    if self.db:
+                        self.db.update_key_usage(key_info.key, is_success=True)
+                    return response.text.strip()
+            except Exception as e:
+                err_str = str(e)
+                if "429" in err_str or "rate limit" in err_str.lower():
+                    key_info.mark_rate_limited(cooldown_seconds=1800)
+                continue
+
+        # Fallback rule-based critique
+        adj_wr = metrics.get('adjusted_win_rate', 0.0)
+        p_factor = metrics.get('profit_factor', 0.0)
+        net_pnl = metrics.get('net_pnl', 0.0)
+        pnl_sign = "+" if net_pnl >= 0 else ""
+
+        critique = (
+            "🎯 *Poin Keunggulan:*\n"
+            f"• Proteksi modal berjalan dengan tingkat pengamanan modal (Capital Preserved Rate) mencapai *{metrics.get('capital_preserved_rate', 0.0)}%*.\n"
+            f"• Stop Loss dan Break-Even disiplin melindungi akun dari kerugian besar.\n\n"
+            "⚠️ *Area Perbaikan:*\n"
+            f"• Real Win Rate berada di *{adj_wr:.1f}%* dengan Profit Factor *{p_factor:.2f}* (Net PnL: *{pnl_sign}${net_pnl:.2f}*).\n"
+            "• Perhatikan volatilitas saat overlap sesi London–New York untuk menghindari fakeout.\n\n"
+            "💡 *Rekomendasi Taktis:*\n"
+            "• Pertahankan rasio Risk-to-Reward minimal 1:1.5 dengan konsistensi trailing Break-Even.\n"
+            "• Fokuskan kuota volume pada pair dengan performa paling stabil (seperti XAUUSD)."
+        )
+        return critique

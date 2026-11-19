@@ -90,3 +90,37 @@ def test_confluence_filter_approved(dummy_tech_buy_signal):
     validated = analyst._validate_and_filter(dummy_tech_buy_signal, decision)
     assert validated.action == "BUY"
     assert validated.confluence_score == 88
+
+
+def test_evaluate_journal():
+    analyst = GeminiAnalyst()
+    metrics = {
+        "total_closed": 3,
+        "wins": 2,
+        "losses": 1,
+        "beps": 0,
+        "adjusted_win_rate": 66.7,
+        "capital_preserved_rate": 66.7,
+        "net_pnl": 15.50,
+        "gross_profit": 20.00,
+        "gross_loss": 4.50,
+        "profit_factor": 4.44,
+        "risk_reward_ratio": 2.22,
+        "avg_win": 10.00,
+        "avg_loss": 4.50,
+        "best_trade": 12.00,
+        "worst_trade": -4.50,
+        "by_symbol": {
+            "XAUUSD": {"total": 2, "wins": 2, "losses": 0, "beps": 0, "win_rate": 100.0, "pnl": 20.00},
+            "BTCUSD": {"total": 1, "wins": 0, "losses": 1, "beps": 0, "win_rate": 0.0, "pnl": -4.50}
+        }
+    }
+    recent = [
+        {"ticket": 101, "symbol": "XAUUSD", "action": "BUY", "profit_loss": 12.00, "close_reason": "TAKE_PROFIT", "ai_reasoning": "Gold trend"},
+        {"ticket": 102, "symbol": "XAUUSD", "action": "BUY", "profit_loss": 8.00, "close_reason": "TAKE_PROFIT", "ai_reasoning": "Gold trend"},
+        {"ticket": 103, "symbol": "BTCUSD", "action": "SELL", "profit_loss": -4.50, "close_reason": "STOP_LOSS", "ai_reasoning": "BTC sell"}
+    ]
+    evaluation = analyst.evaluate_journal(metrics, recent)
+    assert isinstance(evaluation, str)
+    assert len(evaluation) > 50
+    assert "Poin Keunggulan" in evaluation or "Keunggulan" in evaluation
