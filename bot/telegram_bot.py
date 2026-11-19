@@ -590,13 +590,14 @@ class TelegramBotManager:
         """Display recent trade history and win rate from SQLite database with live broker sync."""
         self._register_active_chat(update)
 
-        # 1. Synchronize open positions directly from broker so open trades are always present
+        # 1. Synchronize open positions directly from broker so open trades are always accurate
         if hasattr(self.mt5, "get_open_positions"):
             try:
                 open_pos = self.mt5.get_open_positions()
                 for p in open_pos:
                     t = p["ticket"]
-                    if not self.db.get_trade_by_ticket(t):
+                    existing = self.db.get_trade_by_ticket(t)
+                    if not existing:
                         self.db.record_entry(
                             ticket=t,
                             symbol=p["symbol"],
@@ -609,6 +610,11 @@ class TelegramBotManager:
                             ai_reasoning="Broker active position sync",
                             entry_alert_sent=1
                         )
+                    else:
+                        if existing.get("status") != "OPEN":
+                            self.db.reopen_trade(t)
+                        if p.get("sl") and float(p["sl"]) != float(existing.get("sl_price") or 0.0):
+                            self.db.update_sl(t, float(p["sl"]))
             except Exception as sync_op_err:
                 logger.warning(f"Error syncing open positions in _cmd_history: {sync_op_err}")
 
