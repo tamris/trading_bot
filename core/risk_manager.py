@@ -154,25 +154,30 @@ class RiskManager:
 
         # 3. Session Killzones if session filtering enabled
         if getattr(settings, "SESSION_FILTER_ENABLED", True):
-            # BTC: 24/7 liquid
+            # BTC: 24/7 liquid (outside daily rollover 04:00-06:00 WIB)
             if "BTC" in sym_upper:
                 return True, "Crypto 24/7 active"
 
-            # USDJPY: Active in Asian (06-13), London (14-18), NY (19-23)
+            # USDJPY: Active ONLY in Asian (06:00-12:59) and New York / Overlap (19:00-02:59 WIB)
+            # Blocked during London-only (14:00-18:59) and transition hours (13:00-13:59, 03:00-03:59)
             if "JPY" in sym_upper:
-                if (6 <= hour < 13) or (14 <= hour < 24):
-                    return True, "USDJPY session active"
+                if 6 <= hour < 13:
+                    return True, "USDJPY Asian session active"
+                elif hour >= 19 or hour < 3:
+                    return True, "USDJPY New York session active"
+                elif 14 <= hour < 19:
+                    return False, f"USDJPY standby di Sesi London (Aktif kembali Sesi NY 19:00 WIB, kini: {hour:02d}:{minute:02d} WIB)"
                 else:
-                    return False, f"USDJPY outside active liquidity window (current: {hour:02d}:{minute:02d} WIB)"
+                    return False, f"USDJPY di luar jam sesi aktif Asia/NY (kini: {hour:02d}:{minute:02d} WIB)"
 
-            # EURUSD & XAUUSD: Active in London (14-18) and NY (19-23)
+            # EURUSD & XAUUSD: Active ONLY in London (14:00-18:59) and New York / Overlap (19:00-02:59 WIB)
             if "EUR" in sym_upper or "XAU" in sym_upper or "GOLD" in sym_upper:
-                if 13 <= hour < 24:
+                if hour >= 14 or hour < 3:
                     return True, f"{symbol} London/NY session active"
-                elif 6 <= hour < 13:
-                    return False, f"{symbol} Asian session low volatility (Wait for London Open 14:00 WIB)"
+                elif 6 <= hour < 14:
+                    return False, f"{symbol} standby di Sesi Asia/Pra-Eropa (Tunggu London Open 14:00 WIB)"
                 else:
-                    return False, f"{symbol} outside trading sessions (current: {hour:02d}:{minute:02d} WIB)"
+                    return False, f"{symbol} di luar jam sesi aktif London/NY (kini: {hour:02d}:{minute:02d} WIB)"
 
         return True, "Session OK"
 

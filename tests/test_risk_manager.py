@@ -263,3 +263,58 @@ def test_journal_metrics_and_csv_export(tmp_path):
     assert "XAUUSD" in csv_str
     assert "TAKE_PROFIT" in csv_str
     assert "Gold trend" in csv_str
+
+
+def test_session_filter_strict_windows(risk_env, monkeypatch):
+    from datetime import datetime, timezone, timedelta
+    import core.risk_manager as rm_mod
+
+    wib = timezone(timedelta(hours=7))
+    _, rm = risk_env
+
+    def _set_time(hour: int, minute: int = 15, weekday_day: int = 20):
+        # 2026-11-20 is a Friday (weekday=4)
+        fixed = datetime(2026, 11, weekday_day, hour, minute, 0, tzinfo=wib)
+
+        class _FakeDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return fixed if tz is not None else fixed.replace(tzinfo=None)
+
+        monkeypatch.setattr(rm_mod, "datetime", _FakeDateTime)
+
+    # Sesi Asia (09:15 WIB): USDJPY & BTC aktif; XAUUSD & EURUSD standby
+    _set_time(9, 15)
+    assert rm.is_session_allowed("USDJPY")[0] is True
+    assert rm.is_session_allowed("BTCUSD")[0] is True
+    assert rm.is_session_allowed("XAUUSD")[0] is False
+    assert rm.is_session_allowed("EURUSD")[0] is False
+
+    # Transisi Pra-Eropa (13:15 WIB): hanya BTC aktif; Forex & Gold standby
+    _set_time(13, 15)
+    assert rm.is_session_allowed("USDJPY")[0] is False
+    assert rm.is_session_allowed("EURUSD")[0] is False
+    assert rm.is_session_allowed("XAUUSD")[0] is False
+    assert rm.is_session_allowed("BTCUSD")[0] is True
+
+    # Sesi London (15:15 WIB): XAUUSD, EURUSD & BTC aktif; USDJPY STANDBY!
+    _set_time(15, 15)
+    assert rm.is_session_allowed("USDJPY")[0] is False
+    assert rm.is_session_allowed("XAUUSD")[0] is True
+    assert rm.is_session_allowed("EURUSD")[0] is True
+    assert rm.is_session_allowed("BTCUSD")[0] is True
+
+    # Sesi New York / Overlap (20:15 WIB) & NY malam (01:15 WIB): Semua pair aktif
+    for hr in (20, 1):
+        _set_time(hr, 15)
+        assert rm.is_session_allowed("USDJPY")[0] is True
+        assert rm.is_session_allowed("XAUUSD")[0] is True
+        assert rm.is_session_allowed("EURUSD")[0] is True
+        assert rm.is_session_allowed("BTCUSD")[0] is True
+
+    # Rollover (04:30 WIB): Semua pair freeze
+    _set_time(4, 30)
+    assert rm.is_session_allowed("USDJPY")[0] is False
+    assert rm.is_session_allowed("XAUUSD")[0] is False
+    assert rm.is_session_allowed("EURUSD")[0] is False
+    assert rm.is_session_allowed("BTCUSD")[0] is False
