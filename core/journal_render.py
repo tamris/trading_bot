@@ -106,7 +106,7 @@ def _empty_note(ax, msg: str = "Belum ada data"):
 
 def _pf_str(pf: Any) -> str:
     if pf == float("inf"):
-        return "âˆž"
+        return "\u221e"
     return f"{float(pf):.2f}"
 
 
@@ -244,23 +244,50 @@ def render_dashboard(
     _card(ax_p, "Performa per Pair")
     by_sym = stats.get("by_symbol") or {}
     if by_sym:
-        names = list(by_sym.keys())[::-1]
-        vals = [by_sym[n]["pnl"] for n in names]
+        names = list(by_sym.keys())
+        n = len(names)
+        vals = [by_sym[k]["pnl"] for k in names]
         vmax = max([abs(v) for v in vals] + [1.0])
-        ax_p.barh(range(len(names)), vals, color=[pnl_color(v) for v in vals], height=0.55, zorder=3)
-        ax_p.axvline(0, color=BORDER, linewidth=1)
-        ax_p.set_xlim(-vmax * 2.6, vmax * 2.2)
-        ax_p.set_ylim(-0.7, len(names) - 0.3)
-        for i, n in enumerate(names):
-            g = by_sym[n]
-            v = g["pnl"]
-            ax_p.text(-vmax * 2.5, i, n, va="center", ha="left", fontsize=10.5, color=TEXT, fontweight="bold")
-            ax_p.text(v + (vmax * 0.05 if v >= 0 else -vmax * 0.05), i,
-                      f"{money(v)}  WR {g['win_rate']:.0f}%  {g['wins']}W/{g['losses']}L/{g['beps']}BE",
-                      va="center", ha="left" if v >= 0 else "right", fontsize=8.5, color=TEXT)
+
+        ax_p.set_xlim(0, 1)
+        ax_p.set_ylim(-0.2, n + 0.3)
         ax_p.set_yticks([])
         ax_p.set_xticks([])
         ax_p.grid(False)
+
+        # Render rows from top to bottom
+        for i, sym in enumerate(reversed(names)):
+            y = i + 0.4
+            g = by_sym[sym]
+            v = g["pnl"]
+            colr = pnl_color(v)
+
+            # 1. Symbol Name (e.g. XAUUSD)
+            ax_p.text(0.04, y, sym, fontsize=10, fontweight="bold", color=TEXT, va="center")
+
+            # 2. Stats (e.g. 2W 0L 1BE • 100% WR)
+            stats_txt = f"{g['wins']}W {g['losses']}L"
+            if g.get("beps"):
+                stats_txt += f" {g['beps']}BE"
+            stats_txt += f"  \u2022  {g['win_rate']:.0f}% WR"
+            ax_p.text(0.24, y, stats_txt, fontsize=8.2, color=MUTED, va="center")
+
+            # 3. Visual PnL slider bar (bounded, never overflows)
+            track_x0, track_w = 0.53, 0.26
+            mid_x = track_x0 + track_w / 2.0
+            ax_p.plot([track_x0, track_x0 + track_w], [y, y], color=CARD_2, linewidth=7, solid_capstyle="round", zorder=2)
+            ax_p.plot([mid_x, mid_x], [y - 0.18, y + 0.18], color=BORDER, linewidth=1.5, zorder=3)
+
+            # Bar fill
+            if abs(v) > 0.01:
+                frac = min(abs(v) / vmax, 1.0) * (track_w / 2.0 - 0.01)
+                if v > 0:
+                    ax_p.plot([mid_x, mid_x + frac], [y, y], color=colr, linewidth=7, solid_capstyle="round", zorder=4)
+                else:
+                    ax_p.plot([mid_x - frac, mid_x], [y, y], color=colr, linewidth=7, solid_capstyle="round", zorder=4)
+
+            # 4. PnL Nominal (Right-aligned, never overflows card)
+            ax_p.text(0.96, y, money(v), fontsize=10, fontweight="bold", color=colr, va="center", ha="right")
     else:
         _blank(ax_p)
         _empty_note(ax_p)
