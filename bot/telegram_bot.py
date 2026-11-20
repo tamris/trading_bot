@@ -199,7 +199,6 @@ class TelegramBotManager:
                         BotCommand("status", "📊 Status Saldo & Posisi Aktif"),
                         BotCommand("journal", "📔 Jurnal & Visual Dashboard"),
                         BotCommand("calendar", "📅 Kalender PnL Harian"),
-                        BotCommand("chart", "📈 Equity Curve & Chart Performa"),
                         BotCommand("excel", "📊 Download Excel (.xlsx) Lengkap"),
                         BotCommand("eval", "🧠 Evaluasi Jurnal oleh Gemini AI"),
                         BotCommand("history", "📜 Riwayat 5 Trade Terakhir"),
@@ -522,7 +521,6 @@ class TelegramBotManager:
             "• `/status` atau tombol *📊 Status Akun* - Cek saldo, equity, posisi yang sedang terbuka & drawdown.\n"
             "• `/journal` atau tombol *📔 Jurnal Trading* - Dashboard visual performa, chart equity & tombol download Excel/CSV.\n"
             "• `/calendar` atau tombol *📅 Kalender PnL* - Kalender visual PnL harian (kotak hijau/merah per hari & mingguan).\n"
-            "• `/chart` - Pintasan langsung grafik kurva ekuitas, drawdown, & komposisi hasil.\n"
             "• `/excel` - Download langsung file Excel (.xlsx) rapi lengkap 3 sheet (KPI, Kalender, Log Trade).\n"
             "• `/eval` - Evaluasi mendalam jurnal & kinerja trading oleh Gemini AI.\n"
             "• `/history` atau tombol *📜 Riwayat Trade* - Lihat daftar 5 riwayat trade terakhir (SQLite).\n"
