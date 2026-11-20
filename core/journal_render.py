@@ -513,7 +513,7 @@ def render_trade_log(trades: List[JournalTrade], limit: int = 15) -> bytes:
                                     facecolor=_blend(CARD, bc, 0.25), edgecolor=bc, linewidth=1))
         ax.text(0.8875, y, badge_txt.get(t.outcome, t.outcome), fontsize=7.8, color=bc, ha="center",
                 va="center", fontweight="bold")
-        pnl_txt = money(t.pnl) + ("  (floating)" if t.status == "OPEN" else "")
+        pnl_txt = money(t.pnl)
         ax.text(1.0, y, pnl_txt, fontsize=10, color=pnl_color(t.pnl), ha="right", va="center", fontweight="bold")
 
     return _fig_to_png(fig)
