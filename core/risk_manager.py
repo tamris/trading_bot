@@ -151,6 +151,10 @@ class RiskManager:
             if not is_crypto:
                 return False, "Market closed for weekend (Forex/Metals reopen Monday 05:00 WIB)"
 
+        # 1b. Friday Cutoff Rule (21:00 WIB onwards): Stop new Forex/Gold entries to avoid Weekend Gap
+        if weekday == 4 and hour >= 21 and not is_crypto:
+            return False, f"Friday Cutoff (21:00 WIB): Stop entry baru {symbol} jelang akhir pekan (Anti-Weekend Gap)"
+
         # 2. Daily Rollover Blackout (04:00 - 05:59 WIB) - Spreads widen heavily
         if 4 <= hour < 6:
             return False, "Daily market rollover window (04:00-06:00 WIB) - Spread protection"
@@ -501,3 +505,46 @@ class RiskManager:
                         })
 
         return results
+
+    def check_and_close_weekend_positions(self) -> List[Dict[str, Any]]:
+        """
+        Weekend Flattener (Anti-Weekend Gap):
+        Every Saturday between 03:00 and 03:59 WIB (1-2 hours before Forex/Gold market close
+        and before 04:00 rollover spread widening), automatically close any remaining open
+        Forex/Gold positions. Crypto (BTC & ETH) positions are NEVER touched.
+        """
+        wib = timezone(timedelta(hours=7))
+        now_wib = datetime.now(wib)
+
+        if not (now_wib.weekday() == 5 and 3 <= now_wib.hour < 4):
+            return []
+
+        positions = self.mt5.get_open_positions()
+        if not positions:
+            return []
+
+        closed_list: List[Dict[str, Any]] = []
+        for p in positions:
+            symbol = str(p.get("symbol") or "")
+            if self._is_crypto(symbol):
+                continue
+
+            ticket = p["ticket"]
+            if self.mt5.close_position(ticket):
+                logger.info(
+                    f"[WEEKEND AUTO-CLOSE] Closed {symbol} #{ticket} before market close "
+                    f"(PnL: {float(p.get('profit', 0.0)):+.2f})"
+                )
+                closed_list.append({
+                    "ticket": ticket,
+                    "symbol": symbol,
+                    "action": p.get("type", ""),
+                    "volume": float(p.get("volume", 0.01)),
+                    "entry_price": float(p.get("price_open", 0.0)),
+                    "close_price": float(p.get("price_current", p.get("price_open", 0.0))),
+                    "pnl": float(p.get("profit", 0.0)),
+                })
+            else:
+                logger.error(f"[WEEKEND AUTO-CLOSE] Failed to close {symbol} #{ticket}")
+
+        return closed_list

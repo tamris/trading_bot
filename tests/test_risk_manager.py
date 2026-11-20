@@ -360,3 +360,59 @@ def test_ethusd_weekend_and_crypto_correlation_cap(risk_env, monkeypatch):
     connector.execute_order(symbol="ETHUSD", order_type="BUY", volume=0.04, price=2800.0, sl=2775.0, tp=2850.0)
     ok_eth2, _ = rm.can_open_position("ETHUSD")
     assert ok_eth2 is False
+
+
+def test_friday_cutoff_and_saturday_auto_close(risk_env, monkeypatch):
+    from datetime import datetime, timezone, timedelta
+    import core.risk_manager as rm_mod
+
+    wib = timezone(timedelta(hours=7))
+    connector, rm = risk_env
+
+    def _set_time(day: int, hour: int, minute: int = 0):
+        # 2026-11-20 = Friday (weekday=4), 2026-11-21 = Saturday (weekday=5)
+        fixed = datetime(2026, 11, day, hour, minute, 0, tzinfo=wib)
+
+        class _FakeDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return fixed if tz is not None else fixed.replace(tzinfo=None)
+
+        monkeypatch.setattr(rm_mod, "datetime", _FakeDateTime)
+
+    # 1. Friday 20:59 WIB: Forex & Gold still allowed
+    _set_time(20, 20, 59)
+    assert rm.is_session_allowed("USDJPY")[0] is True
+    assert rm.is_session_allowed("XAUUSD")[0] is True
+    assert rm.is_session_allowed("EURUSD")[0] is True
+
+    # 2. Friday 21:00 & 22:30 WIB: Forex & Gold blocked (Friday Cutoff), Crypto still allowed
+    for hr, mn in ((21, 0), (22, 30)):
+        _set_time(20, hr, mn)
+        ok_jpy, msg_jpy = rm.is_session_allowed("USDJPY")
+        assert ok_jpy is False
+        assert "Friday Cutoff" in msg_jpy
+        assert rm.is_session_allowed("XAUUSD")[0] is False
+        assert rm.is_session_allowed("EURUSD")[0] is False
+        assert rm.is_session_allowed("BTCUSD")[0] is True
+        assert rm.is_session_allowed("ETHUSD")[0] is True
+
+    # 3. Open 1 USDJPY, 1 XAUUSD, 1 BTCUSD, 1 ETHUSD
+    connector.execute_order(symbol="USDJPY", order_type="SELL", volume=0.01, price=158.800, sl=158.980, tp=158.450)
+    connector.execute_order(symbol="XAUUSD", order_type="BUY", volume=0.01, price=3720.0, sl=3710.0, tp=3740.0)
+    connector.execute_order(symbol="BTCUSD", order_type="BUY", volume=0.01, price=63000.0, sl=62500.0, tp=64000.0)
+    connector.execute_order(symbol="ETHUSD", order_type="BUY", volume=0.04, price=2800.0, sl=2775.0, tp=2850.0)
+
+    # Friday 22:30 WIB: Auto-close must NOT trigger yet (let existing trades finish naturally)
+    _set_time(20, 22, 30)
+    assert rm.check_and_close_weekend_positions() == []
+    assert len(connector.get_open_positions()) == 4
+
+    # Saturday 03:15 WIB: Auto-close closes ONLY USDJPY & XAUUSD; BTCUSD & ETHUSD remain OPEN!
+    _set_time(21, 3, 15)
+    closed = rm.check_and_close_weekend_positions()
+    closed_syms = {c["symbol"] for c in closed}
+    assert closed_syms == {"USDJPY", "XAUUSD"}
+
+    remaining_syms = {p["symbol"] for p in connector.get_open_positions()}
+    assert remaining_syms == {"BTCUSD", "ETHUSD"}

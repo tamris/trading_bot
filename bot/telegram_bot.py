@@ -622,7 +622,8 @@ class TelegramBotManager:
             "• `04:00 - 06:00` 🛡️ Rollover Break (Freeze Anti-Spread)\n\n"
             "💡 *Alokasi Kuota Slot Dinamis (Anti-Double Risk Crypto):*\n"
             "• *Hari Kerja (Senin–Jumat):* Gabungan Crypto (BTC + ETH) dibatasi maks *1 posisi total* agar slot FX/Gold tetap aman.\n"
-            "• *Akhir Pekan (Sabtu–Minggu):* Forex/Gold libur, Crypto aktif maks *1 posisi BTC + 1 posisi ETH* (total maks 2 posisi)."
+            "• *Akhir Pekan (Sabtu–Minggu):* Forex/Gold libur, Crypto aktif maks *1 posisi BTC + 1 posisi ETH* (total maks 2 posisi).\n"
+            "• *Proteksi Weekend Gap (Forex/Gold):* Stop entry baru mulai *Jumat 21:00 WIB* & auto-close sisa posisi *Sabtu 03:00 WIB*."
         )
         await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=REPLY_KEYBOARD)
 

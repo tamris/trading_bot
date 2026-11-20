@@ -509,6 +509,41 @@ class TradingBotApp:
                         msg = f"🛡️ *Break-Even Aktif (WIB):* Stop Loss dipindahkan ke harga Entry (`{entry_p}`) untuk Tiket `#{t}`."
                         await self.telegram.send_alert(msg)
 
+            # 3b. Weekend Flattener: Saturday 03:00-03:59 WIB auto-close remaining Forex/Gold positions
+            weekend_closed = self.risk_manager.check_and_close_weekend_positions()
+            if weekend_closed:
+                for item in weekend_closed:
+                    t = item["ticket"]
+                    sym = item["symbol"]
+                    pnl = item["pnl"]
+                    close_p = item["close_price"]
+                    entry_p = item["entry_price"]
+                    vol = item["volume"]
+                    act = item["action"]
+
+                    self.db.record_close(
+                        ticket=t,
+                        close_price=close_p,
+                        profit_loss=pnl,
+                        close_reason="WEEKEND_AUTO_CLOSE",
+                        close_alert_sent=1
+                    )
+                    self.risk_manager.record_symbol_exit(sym)
+                    active_tickets.discard(t)
+
+                    pnl_sign = "+" if pnl >= 0 else ""
+                    emoji = "🟢" if pnl >= 0 else "🟠"
+                    msg = (
+                        f"🛡️ *AUTO-CLOSE AKHIR PEKAN (ANTI-WEEKEND GAP)*\n\n"
+                        f"• *Tiket:* `#{t}`\n"
+                        f"• *Instrumen:* `{sym}` ({act} {vol:.2f} Lot)\n"
+                        f"• *Harga Entry:* `{entry_p}`\n"
+                        f"• *Harga Tutup:* `{close_p}`\n"
+                        f"• *Estimasi PnL:* `{pnl_sign}${pnl:.2f}` {emoji}\n"
+                        f"• *Alasan:* Posisi Forex/Gold ditutup otomatis sebelum market tutup (Sabtu 03:00 WIB) demi mencegah risiko *weekend gap* Senin pagi."
+                    )
+                    await self.telegram.send_alert(msg)
+
             # 4. Check for closed trades from SQLite tracked trades
             # Guard: NEVER assume positions closed if the broker snapshot failed (e.g. HTTP 429 / timeout)!
             if getattr(self.mt5, "last_snapshot_ok", True) is False:
