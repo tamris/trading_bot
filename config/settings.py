@@ -42,7 +42,7 @@ class Settings(BaseSettings):
     TELEGRAM_CHAT_ID: str = Field(default="5443625348,7030527954", description="Telegram Chat ID for alerts and monitoring")
 
     # Trading Symbol & Timeframes
-    SYMBOLS_RAW: str = Field(default="BTCUSD,XAUUSD,EURUSD,USDJPY", alias="SYMBOLS", description="Comma-separated symbols to trade")
+    SYMBOLS_RAW: str = Field(default="BTCUSD,ETHUSD,XAUUSD,EURUSD,USDJPY", alias="SYMBOLS", description="Comma-separated symbols to trade")
     TIMEFRAME_MACRO: str = Field(default="H1", description="Macro trend timeframe")
     TIMEFRAME_ENTRY: str = Field(default="M15", description="Entry execution timeframe")
 

@@ -349,9 +349,9 @@ ATURAN KONFLUENSI:
 3. Untuk USDJPY:
    - Sentimen BULLISH_USD / yield obligasi US10Y naik / BOJ dovish -> Sangat mendukung BUY (Bullish USDJPY).
    - Sentimen BEARISH_USD / intervensi Yen / BOJ hawkish -> Sangat mendukung SELL (Bearish USDJPY).
-4. Untuk BTCUSD:
-   - Sentimen Risk-On / inflasi melandai / likuiditas global naik -> Sangat mendukung BUY (Bullish BTC).
-   - Sentimen Risk-Off / regulasi ketat / likuidasi pasar -> Sangat mendukung SELL (Bearish BTC).
+4. Untuk BTCUSD & ETHUSD (Crypto):
+   - Sentimen Risk-On / inflasi melandai / aliran dana ETF Crypto positif / likuiditas global naik -> Sangat mendukung BUY (Bullish Crypto).
+   - Sentimen Risk-Off / regulasi ketat / likuidasi pasar / penguatan tajam DXY -> Sangat mendukung SELL (Bearish Crypto).
 5. Berikan 'confluence_score' (angka bulat 0 hingga 100) secara dinamis, presisi, dan objektif sesuai bobot bukti makro:
    - Skor 90 - 95: Konfluensi sempurna dan luar biasa kuat (katalis berita tier-1 selaras 100% dengan momentum teknikal).
    - Skor 85 - 89: Sentimen makro sangat jelas dan dominan searah dengan setup teknikal.
@@ -381,7 +381,7 @@ Keluarkan respon HANYA dalam format JSON valid sesuai schema.
             bias_sell = "BEARISH_USD"
             reason_buy = f"Sentimen penguatan Dolar AS (yield Treasury naik) selaras dengan pantulan teknikal {tech_signal.symbol} di atas EMA50."
             reason_sell = f"Sentimen pelemahan Dolar AS dan antisipasi intervensi Yen selaras dengan penolakan teknikal {tech_signal.symbol} di bawah EMA200."
-        elif "BTC" in sym_upper:
+        elif "BTC" in sym_upper or "ETH" in sym_upper:
             bias_buy = "RISK_ON"
             bias_sell = "RISK_OFF"
             reason_buy = f"Sentimen risk-on global dan aliran dana positif crypto selaras dengan penembusan teknikal {tech_signal.symbol} di atas EMA50."

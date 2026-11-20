@@ -32,6 +32,13 @@ def test_symbol_info_specifications():
     assert btc["point"] == 0.01
     assert btc["contract_size"] == 1.0
 
+    # Crypto ETHUSD
+    eth = conn.get_symbol_info("ETHUSD")
+    assert eth["digits"] == 2
+    assert eth["point"] == 0.01
+    assert eth["contract_size"] == 1.0
+    assert eth["tick_value"] == 0.01
+
 
 def test_b64url():
     raw = b"hello_world"

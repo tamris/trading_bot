@@ -318,3 +318,45 @@ def test_session_filter_strict_windows(risk_env, monkeypatch):
     assert rm.is_session_allowed("XAUUSD")[0] is False
     assert rm.is_session_allowed("EURUSD")[0] is False
     assert rm.is_session_allowed("BTCUSD")[0] is False
+    assert rm.is_session_allowed("ETHUSD")[0] is False
+
+
+def test_ethusd_weekend_and_crypto_correlation_cap(risk_env, monkeypatch):
+    from datetime import datetime, timezone, timedelta
+    import core.risk_manager as rm_mod
+
+    wib = timezone(timedelta(hours=7))
+    connector, rm = risk_env
+
+    def _set_time(day: int, hour: int = 15):
+        # 2026-11-20 = Friday (weekday=4), 2026-11-21 = Saturday (weekday=5)
+        fixed = datetime(2026, 11, day, hour, 0, 0, tzinfo=wib)
+
+        class _FakeDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return fixed if tz is not None else fixed.replace(tzinfo=None)
+
+        monkeypatch.setattr(rm_mod, "datetime", _FakeDateTime)
+
+    # 1. Weekday (Friday): If 1 BTCUSD is open, ETHUSD must be blocked (aggregate crypto cap = 1)
+    _set_time(20, 15)
+    connector.execute_order(symbol="BTCUSD", order_type="BUY", volume=0.01, price=63000.0, sl=62500.0, tp=64000.0)
+    ok_eth_weekday, msg_eth_weekday = rm.can_open_position("ETHUSD")
+    assert ok_eth_weekday is False
+    assert "aggregate Crypto" in msg_eth_weekday
+
+    # 2. Weekend (Saturday): FX/Gold closed, BTC & ETH allowed.
+    # With 1 BTC open: 2nd BTC blocked (max 1/coin), 1st ETH ALLOWED (1 BTC + 1 ETH = 2 total)
+    _set_time(21, 15)
+    assert rm.is_session_allowed("ETHUSD")[0] is True
+    assert rm.is_session_allowed("XAUUSD")[0] is False
+    ok_btc2, _ = rm.can_open_position("BTCUSD")
+    assert ok_btc2 is False
+    ok_eth1, _ = rm.can_open_position("ETHUSD")
+    assert ok_eth1 is True
+
+    # Open 1 ETHUSD -> now 1 BTC + 1 ETH open, 2nd ETH must be blocked
+    connector.execute_order(symbol="ETHUSD", order_type="BUY", volume=0.04, price=2800.0, sl=2775.0, tp=2850.0)
+    ok_eth2, _ = rm.can_open_position("ETHUSD")
+    assert ok_eth2 is False

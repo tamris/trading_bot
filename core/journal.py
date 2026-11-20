@@ -91,7 +91,7 @@ class JournalTrade:
         s = self.symbol.upper()
         if "JPY" in s:
             return 3
-        if "BTC" in s or "XAU" in s:
+        if "BTC" in s or "ETH" in s or "XAU" in s:
             return 2
         return 5
 

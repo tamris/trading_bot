@@ -345,7 +345,7 @@ class TelegramBotManager:
             tp_val = float(tp or 0.0)
             lot_val = float(lot_size or 0.01)
 
-            dec = 3 if "JPY" in symbol else (2 if ("BTC" in symbol or "XAU" in symbol) else 5)
+            dec = 3 if "JPY" in symbol else (2 if ("BTC" in symbol or "ETH" in symbol or "XAU" in symbol) else 5)
             sentiment_str = f"• *Sentimen Berita:* `{news_sentiment}`\n" if news_sentiment else ""
 
             msg = (
@@ -401,7 +401,7 @@ class TelegramBotManager:
             pnl_val = float(pnl or 0.0)
             lot_val = float(lot_size or 0.01)
 
-            dec = 3 if "JPY" in symbol else (2 if ("BTC" in symbol or "XAU" in symbol) else 5)
+            dec = 3 if "JPY" in symbol else (2 if ("BTC" in symbol or "ETH" in symbol or "XAU" in symbol) else 5)
             pnl_str = f"+${pnl_val:.2f}" if pnl_val >= 0 else f"-${abs(pnl_val):.2f}"
 
             clean_entry_time = str(entry_time or "").replace("T", " ")[:19]
@@ -438,7 +438,7 @@ class TelegramBotManager:
             pnl_str = f"+${pnl_val:.2f}" if pnl_val >= 0 else f"-${abs(pnl_val):.2f}"
             ep = float(entry_price or 0.0)
             cp = float(close_price or 0.0)
-            dec = 3 if "JPY" in symbol else (2 if ("BTC" in symbol or "XAU" in symbol) else 5)
+            dec = 3 if "JPY" in symbol else (2 if ("BTC" in symbol or "ETH" in symbol or "XAU" in symbol) else 5)
 
             msg = (
                 "🎯 *PARTIAL TAKE PROFIT TERCAPAI (TP1 - 50%)!*\n\n"
@@ -579,16 +579,16 @@ class TelegramBotManager:
 
         if weekday in (5, 6):
             session_name = "🏖️ Akhir Pekan (Forex & Gold Tutup)"
-            session_desc = "Pasar Forex dan Logam libur. Hanya Crypto (BTC) yang aktif 24/7."
+            session_desc = "Pasar Forex dan Logam libur. Hanya Crypto (BTC & ETH) yang aktif 24/7."
         elif 6 <= current_hour < 13:
             session_name = "🌏 Sesi Asia (Tokyo & Sydney)"
-            session_desc = "Fokus utama: USDJPY & BTC. Emas & Euro standby menunggu Sesi London (14:00 WIB)."
+            session_desc = "Fokus utama: USDJPY & Crypto (BTC/ETH). Emas & Euro standby menunggu Sesi London (14:00 WIB)."
         elif 13 <= current_hour < 14:
             session_name = "⏳ Transisi Pra-Eropa (Menuju London Open)"
             session_desc = "Pasar Asia bersiap tutup, bersiap menyambut pembukaan bursa London."
         elif 14 <= current_hour < 19:
             session_name = "🇬🇧 Sesi London (Eropa)"
-            session_desc = "Volatilitas tinggi! Fokus utama: XAUUSD (Gold), EURUSD, & BTC."
+            session_desc = "Volatilitas tinggi! Fokus utama: XAUUSD (Gold), EURUSD, & Crypto (BTC/ETH)."
         elif 19 <= current_hour < 21:
             session_name = "🔥 Overlap London & New York (Golden Hours)"
             session_desc = "Likuiditas tertinggi dunia! Semua pair aktif dengan momentum kencang."
@@ -604,7 +604,7 @@ class TelegramBotManager:
             f"• *Waktu Saat Ini:* `{wib_time}`\n"
             f"• *Sesi Sedang Berjalan:* *{session_name}*\n"
             f"• *Karakteristik:* _{session_desc}_\n\n"
-            "📋 *Status Izin Entry Pair (The 4 Kings):*\n"
+            "📋 *Status Izin Entry Pair:*\n"
         )
 
         for sym in settings.SYMBOLS:
@@ -616,13 +616,13 @@ class TelegramBotManager:
 
         msg += (
             "📌 *Jadwal Jam Sesi Utama (WIB):*\n"
-            "• `06:00 - 13:00` 🌏 Sesi Asia (Fokus: USDJPY & BTC)\n"
-            "• `14:00 - 21:00` 🇬🇧 Sesi London (Fokus: XAUUSD, EURUSD & BTC)\n"
+            "• `06:00 - 13:00` 🌏 Sesi Asia (Fokus: USDJPY & BTC/ETH)\n"
+            "• `14:00 - 19:00` 🇬🇧 Sesi London (Fokus: XAUUSD, EURUSD & BTC/ETH)\n"
             "• `19:00 - 03:00` 🇺🇸 Sesi New York (Semua Pair Aktif Agresif)\n"
             "• `04:00 - 06:00` 🛡️ Rollover Break (Freeze Anti-Spread)\n\n"
-            "💡 *Alokasi Kuota Slot Dinamis:*\n"
-            "• *Hari Kerja (Senin–Jumat):* BTC dibatasi maks *1 posisi* agar minimal 2 slot tersisa aman untuk Forex/Gold.\n"
-            "• *Akhir Pekan (Sabtu–Minggu):* Forex/Gold libur, kuota BTC otomatis naik ke maks *2 posisi*."
+            "💡 *Alokasi Kuota Slot Dinamis (Anti-Double Risk Crypto):*\n"
+            "• *Hari Kerja (Senin–Jumat):* Gabungan Crypto (BTC + ETH) dibatasi maks *1 posisi total* agar slot FX/Gold tetap aman.\n"
+            "• *Akhir Pekan (Sabtu–Minggu):* Forex/Gold libur, Crypto aktif maks *1 posisi BTC + 1 posisi ETH* (total maks 2 posisi)."
         )
         await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=REPLY_KEYBOARD)
 
@@ -753,7 +753,7 @@ class TelegramBotManager:
         for idx, t in enumerate(trades, 1):
             status = t["status"]
             sym = t.get("symbol", "")
-            dec = 3 if "JPY" in sym else (2 if ("BTC" in sym or "XAU" in sym) else 5)
+            dec = 3 if "JPY" in sym else (2 if ("BTC" in sym or "ETH" in sym or "XAU" in sym) else 5)
             ep = float(t.get("entry_price") or 0.0)
 
             if status == "OPEN":

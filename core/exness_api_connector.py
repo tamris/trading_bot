@@ -302,30 +302,41 @@ class ExnessApiConnector:
         Compliant with MT5Connector.get_symbol_info return structure.
         """
         inst = self.normalize_symbol(symbol)
-        is_crypto = "BTC" in inst
+        is_btc = "BTC" in inst
+        is_eth = "ETH" in inst
         is_gold = "XAU" in inst or "GOLD" in inst
         is_jpy = "JPY" in inst
 
-        if is_crypto:
+        if is_btc:
             digits = 2
             point = 0.01
             contract_size = 1.0
             default_spread = 2500
+            tick_value = 1.0
+        elif is_eth:
+            digits = 2
+            point = 0.01
+            contract_size = 1.0
+            default_spread = 250
+            tick_value = 0.01
         elif is_gold:
             digits = 2
             point = 0.01
             contract_size = 100.0
             default_spread = 35
+            tick_value = 1.0
         elif is_jpy:
             digits = 3
             point = 0.001
             contract_size = 100000.0
             default_spread = 15
+            tick_value = 0.65
         else:
             digits = 5
             point = 0.00001
             contract_size = 100000.0
             default_spread = 15
+            tick_value = 1.0
 
         return {
             "name": symbol,
@@ -333,9 +344,9 @@ class ExnessApiConnector:
             "digits": digits,
             "point": point,
             "tick_size": point,
-            "tick_value": 1.0 if not is_jpy else 0.65,
+            "tick_value": tick_value,
             "trade_tick_size": point,
-            "trade_tick_value": 1.0 if not is_jpy else 0.65,
+            "trade_tick_value": tick_value,
             "contract_size": contract_size,
             "volume_min": 0.01,
             "volume_max": 200.0,

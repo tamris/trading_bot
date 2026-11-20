@@ -17,10 +17,12 @@ class RiskManager:
         "EURUSDM": 25,
         "USDJPYM": 25,
         "BTCUSDM": 3500,
+        "ETHUSDM": 600,
         "XAUUSD": 45,
         "EURUSD": 25,
         "USDJPY": 25,
-        "BTCUSD": 3500
+        "BTCUSD": 3500,
+        "ETHUSD": 600
     }
 
     def __init__(self, mt5_connector: MT5Connector, db: Optional[Any] = None):
@@ -143,9 +145,10 @@ class RiskManager:
         minute = now_wib.minute
         sym_upper = symbol.upper()
 
-        # 1. Weekend Rule: Only Crypto (BTC) trades on Saturday & Sunday
+        # 1. Weekend Rule: Only Crypto (BTC & ETH) trades on Saturday & Sunday
+        is_crypto = self._is_crypto(sym_upper)
         if weekday in (5, 6):
-            if "BTC" not in sym_upper:
+            if not is_crypto:
                 return False, "Market closed for weekend (Forex/Metals reopen Monday 05:00 WIB)"
 
         # 2. Daily Rollover Blackout (04:00 - 05:59 WIB) - Spreads widen heavily
@@ -154,8 +157,8 @@ class RiskManager:
 
         # 3. Session Killzones if session filtering enabled
         if getattr(settings, "SESSION_FILTER_ENABLED", True):
-            # BTC: 24/7 liquid (outside daily rollover 04:00-06:00 WIB)
-            if "BTC" in sym_upper:
+            # Crypto (BTC & ETH): 24/7 liquid (outside daily rollover 04:00-06:00 WIB)
+            if is_crypto:
                 return True, "Crypto 24/7 active"
 
             # USDJPY: Active ONLY in Asian (06:00-12:59) and New York / Overlap (19:00-02:59 WIB)
@@ -203,25 +206,29 @@ class RiskManager:
             return s[:-1]
         return s
 
+    @classmethod
+    def _is_crypto(cls, sym: str) -> bool:
+        s = cls._clean_symbol(sym)
+        return "BTC" in s or "ETH" in s or "CRYPTO" in s
+
     def get_max_positions_for_symbol(self, symbol: str) -> Tuple[int, str]:
         """
         Dynamically determine maximum allowed open positions for a symbol based on market regime:
-        - Crypto (BTC) during Weekday/Active Forex Sessions: 1 position (saving capacity for FX/Gold)
-        - Crypto (BTC) during Weekend (Sat-Sun): 2 positions (Forex & Gold are closed)
+        - Crypto (BTC & ETH) during Weekday: 1 position per coin & max 1 total Crypto combined (saving slots for FX/Gold)
+        - Crypto (BTC & ETH) during Weekend (Sat-Sun): 1 position per coin (max 1 BTC + 1 ETH = 2 total Crypto)
         - Forex / Metals (XAUUSD, EURUSD, USDJPY): standard max_positions_per_symbol (e.g. 2)
         """
         wib = timezone(timedelta(hours=7))
         now_wib = datetime.now(wib)
         weekday = now_wib.weekday()  # 0=Monday ... 5=Saturday, 6=Sunday
-        sym_clean = self._clean_symbol(symbol)
 
-        if "BTC" in sym_clean or "ETH" in sym_clean or "CRYPTO" in sym_clean:
-            # Weekend (Saturday & Sunday): Forex & Gold closed -> Crypto can take full weekend quota
+        if self._is_crypto(symbol):
+            # Weekend (Saturday & Sunday): Max 1 per coin (1 BTC + 1 ETH = max 2 Crypto total)
             if weekday in (5, 6):
-                return self.max_crypto_weekend_positions, f"Mode Akhir Pekan (Maks {self.max_crypto_weekend_positions} Posisi)"
+                return 1, f"Mode Akhir Pekan (Maks 1 Posisi/Koin, Total Crypto Maks {self.max_crypto_weekend_positions})"
 
-            # Weekdays (Monday - Friday): Forex/Gold active -> Cap Crypto to 1 to reserve slots for FX/Gold
-            return self.max_crypto_active_positions, f"Sesi Aktif Hari Kerja (Cap {self.max_crypto_active_positions} Posisi - Slot FX/Gold Dijaga)"
+            # Weekdays (Monday - Friday): Forex/Gold active -> Cap total Crypto combined to 1
+            return self.max_crypto_active_positions, f"Hari Kerja (Total Crypto Gabungan Maks {self.max_crypto_active_positions} - Slot FX/Gold Dijaga)"
 
         return self.max_positions_per_symbol, f"Standar (Maks {self.max_positions_per_symbol} Posisi)"
 
@@ -298,6 +305,25 @@ class RiskManager:
             msg = f"Max positions for {symbol} reached ({len(symbol_positions)}/{allowed_max}) [{regime_desc}]."
             logger.warning(msg)
             return False, msg
+
+        # 7. Aggregate Crypto correlation guard (BTC + ETH combined)
+        # Weekday: max 1 total Crypto position across BTC & ETH (preserves FX/Gold slots & prevents double correlated risk)
+        # Weekend: max 2 total Crypto positions (combined with per-symbol cap 1 -> strictly 1 BTC + 1 ETH)
+        if self._is_crypto(symbol):
+            wib = timezone(timedelta(hours=7))
+            weekday = datetime.now(wib).weekday()
+            crypto_cap = self.max_crypto_weekend_positions if weekday in (5, 6) else self.max_crypto_active_positions
+            crypto_positions = [
+                p for p in all_positions
+                if self._is_crypto(p.get("symbol", ""))
+            ]
+            if len(crypto_positions) >= crypto_cap:
+                msg = (
+                    f"Max aggregate Crypto positions reached ({len(crypto_positions)}/{crypto_cap}) "
+                    f"untuk cegah double risk BTC/ETH [{regime_desc}]."
+                )
+                logger.warning(msg)
+                return False, msg
 
         return True, "Risk checks passed"
 
