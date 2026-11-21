@@ -338,6 +338,8 @@ class ExnessApiConnector:
             default_spread = 15
             tick_value = 1.0
 
+        vol_min = 0.10 if is_eth else 0.01
+
         return {
             "name": symbol,
             "symbol": symbol,
@@ -348,7 +350,7 @@ class ExnessApiConnector:
             "trade_tick_size": point,
             "trade_tick_value": tick_value,
             "contract_size": contract_size,
-            "volume_min": 0.01,
+            "volume_min": vol_min,
             "volume_max": 200.0,
             "volume_step": 0.01,
             "spread": default_spread

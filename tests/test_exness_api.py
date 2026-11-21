@@ -38,6 +38,7 @@ def test_symbol_info_specifications():
     assert eth["point"] == 0.01
     assert eth["contract_size"] == 1.0
     assert eth["tick_value"] == 0.01
+    assert eth["volume_min"] == 0.10
 
 
 def test_b64url():
