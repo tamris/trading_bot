@@ -89,3 +89,48 @@ def test_evaluate_setup_buy(sample_candles):
         sl_dist = sig.entry_price - sig.sl_price
         tp_dist = sig.tp_price - sig.entry_price
         assert pytest.approx(tp_dist / sl_dist, rel=1e-2) == 2.0
+
+
+def test_eurusd_rejects_reversal_above_ema50_and_overextended_sell():
+    """Verify EURUSD cannot trigger SELL when price broke ABOVE EMA50 or is overextended >1x ATR below EMA50."""
+    engine = TechnicalEngine()
+    count = 250
+    times = pd.date_range(end=datetime.now(timezone.utc), periods=count, freq="15min")
+    # Clean downtrend on EURUSD (~1.1000 down to 1.0900)
+    close = np.linspace(1.10000, 1.09000, count)
+    df = pd.DataFrame({
+        "time": times,
+        "open": close + 0.00010,
+        "high": close + 0.00030,
+        "low": close - 0.00030,
+        "close": close,
+        "tick_volume": 100,
+        "spread": 10,
+        "real_volume": 0
+    })
+    ind = engine.compute_indicators(df)
+    ema50 = float(ind["ema50"].iloc[-1])
+    ema200 = float(ind["ema200"].iloc[-1])
+    atr = float(ind["atr"].iloc[-1])
+    assert ema50 < ema200
+
+    # Case 1: Bullish reversal breakout ABOVE EMA50 (still below EMA200) -> MUST BE REJECTED!
+    df_rev = df.copy()
+    df_rev.loc[df_rev.index[-1], "open"] = ema50 + 0.00040
+    df_rev.loc[df_rev.index[-1], "high"] = ema50 + 0.00050
+    df_rev.loc[df_rev.index[-1], "low"] = ema50 + 0.00010
+    df_rev.loc[df_rev.index[-1], "close"] = ema50 + 0.00025
+    sig_rev = engine.evaluate_setup("EURUSD", df_rev)
+    assert sig_rev.is_valid is False
+    assert sig_rev.action == "HOLD"
+
+    # Case 2: Overextended 15 pips below EMA50 (was wrongly accepted by 0.2% = 22 pips before!) -> MUST BE REJECTED!
+    df_ext = df.copy()
+    far_below = ema50 - max(0.00150, 2.5 * atr)
+    df_ext.loc[df_ext.index[-1], "open"] = far_below + 0.00010
+    df_ext.loc[df_ext.index[-1], "high"] = far_below + 0.00020
+    df_ext.loc[df_ext.index[-1], "low"] = far_below - 0.00020
+    df_ext.loc[df_ext.index[-1], "close"] = far_below
+    sig_ext = engine.evaluate_setup("EURUSD", df_ext)
+    assert sig_ext.is_valid is False
+    assert sig_ext.action == "HOLD"

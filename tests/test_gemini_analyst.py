@@ -124,3 +124,36 @@ def test_evaluate_journal():
     assert isinstance(evaluation, str)
     assert len(evaluation) > 50
     assert "Poin Keunggulan" in evaluation or "Keunggulan" in evaluation
+
+
+def test_gemini_fail_safe_hold_when_all_keys_fail(dummy_tech_buy_signal):
+    from core.gemini_analyst import GeminiKeyInfo
+
+    analyst = GeminiAnalyst()
+
+    class _BrokenInteractions:
+        def create(self, **kwargs):
+            raise RuntimeError("503 Service Unavailable")
+
+    class _BrokenClient:
+        interactions = _BrokenInteractions()
+
+    k1 = GeminiKeyInfo(key="FAKE_KEY_1_1234567890")
+    k1.client = _BrokenClient()
+    analyst._pool = [k1]
+
+    decision = analyst.analyze_confluence(dummy_tech_buy_signal, [])
+    # CRITICAL: Must NEVER auto-approve with fake score 85! Must enforce Fail-Safe HOLD (score 0)
+    assert decision.action == "HOLD"
+    assert decision.confluence_score == 0
+    assert "Fail-Safe HOLD" in decision.reasoning
+    assert k1.error_count == 1
+    assert "503" in k1.last_error
+
+
+def test_gemini_jpy_sentiment_and_markdown_json_cleanup():
+    raw = '```json\n{"symbol":"USDJPY","technical_bias":"BEARISH","news_sentiment":"BULLISH_JPY","confluence_score":87,"action":"SELL","reasoning":"BOJ hawkish"}\n```'
+    cleaned = GeminiAnalyst._clean_json_text(raw)
+    decision = GeminiTradingDecision.model_validate_json(cleaned)
+    assert decision.news_sentiment == "BULLISH_JPY"
+    assert decision.confluence_score == 87

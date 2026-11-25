@@ -23,7 +23,13 @@ class GeminiTradingDecision(BaseModel):
     technical_bias: Literal["BULLISH", "BEARISH", "NEUTRAL"] = Field(
         description="Technical bias from indicator analysis"
     )
-    news_sentiment: Literal["BULLISH_USD", "BEARISH_USD", "BULLISH_EUR", "BEARISH_EUR", "RISK_ON", "RISK_OFF", "NEUTRAL"] = Field(
+    news_sentiment: Literal[
+        "BULLISH_USD", "BEARISH_USD",
+        "BULLISH_EUR", "BEARISH_EUR",
+        "BULLISH_JPY", "BEARISH_JPY",
+        "BULLISH_GOLD", "BEARISH_GOLD",
+        "RISK_ON", "RISK_OFF", "NEUTRAL"
+    ] = Field(
         description="Dominant macro/currency sentiment extracted from news"
     )
     confluence_score: int = Field(
@@ -60,12 +66,14 @@ class GeminiKeyInfo:
         self.requests_count: int = requests_count
         self.success_count: int = success_count
         self.rate_limit_count: int = rate_limit_count
+        self.error_count: int = 0
+        self.last_error: str = ""
         self._init_client()
 
     def _init_client(self):
         if GENAI_AVAILABLE and self.key and self.key != "your_gemini_api_key_here":
             try:
-                self.client = genai.Client(api_key=self.key, http_options={"timeout": 6000})
+                self.client = genai.Client(api_key=self.key, http_options={"timeout": 15000})
                 if hasattr(self.client, "interactions") and hasattr(self.client.interactions, "sdk_configuration"):
                     rc = getattr(self.client.interactions.sdk_configuration, "retry_config", None)
                     if rc and hasattr(rc, "max_retries"):
@@ -183,9 +191,35 @@ class GeminiAnalyst:
                 "is_available": is_avail,
                 "requests": info.requests_count,
                 "success": info.success_count,
-                "rate_limits": info.rate_limit_count
+                "rate_limits": info.rate_limit_count,
+                "errors": info.error_count,
+                "last_error": info.last_error
             })
         return res
+
+    @staticmethod
+    def _clean_json_text(raw_text: str) -> str:
+        """Strip optional markdown code fences around JSON output."""
+        txt = raw_text.strip()
+        if txt.startswith("```"):
+            lines = txt.splitlines()
+            if lines and lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip().startswith("```"):
+                lines = lines[:-1]
+            txt = "\n".join(lines).strip()
+        return txt
+
+    def _fail_safe_hold(self, tech_signal: TechnicalSignal, reason: str) -> GeminiTradingDecision:
+        """Strict fail-safe HOLD decision whenever Gemini AI is unavailable (never blind-entry!)."""
+        return GeminiTradingDecision(
+            symbol=tech_signal.symbol,
+            technical_bias=tech_signal.bias if tech_signal.bias in ["BULLISH", "BEARISH"] else "NEUTRAL",
+            news_sentiment="NEUTRAL",
+            confluence_score=0,
+            action="HOLD",
+            reasoning=f"[AI Unavailable - Fail-Safe HOLD] {reason}"
+        )
 
     def analyze_confluence(
         self,
@@ -195,12 +229,17 @@ class GeminiAnalyst:
         """
         Analyze news headlines against technical setup using Round-Robin API Key Polling
         with instant failover on 429 rate limit.
+        STRICT FAIL-SAFE: Never auto-approves trades if Gemini AI fails or keys are exhausted.
         """
         if not self._pool:
-            return self._mock_analysis(tech_signal, news_headlines)
+            if getattr(settings, "MT5_MOCK_MODE", False):
+                return self._mock_analysis(tech_signal, news_headlines)
+            logger.error("No Gemini API keys configured in live mode. Blocking trade (Fail-Safe HOLD).")
+            return self._fail_safe_hold(tech_signal, "Tidak ada API key Gemini aktif di pool.")
 
         prompt = self._build_prompt(tech_signal, news_headlines)
         num_keys = len(self._pool)
+        last_err_summary = "Semua key sedang cooldown atau gagal merespons."
 
         # Iterate through available keys in pool
         for attempt in range(num_keys):
@@ -229,15 +268,18 @@ class GeminiAnalyst:
                 if not raw_text:
                     raise ValueError("Empty response received from Gemini.")
 
-                decision = GeminiTradingDecision.model_validate_json(raw_text)
+                cleaned = self._clean_json_text(raw_text)
+                decision = GeminiTradingDecision.model_validate_json(cleaned)
                 validated_decision = self._validate_and_filter(tech_signal, decision)
                 key_info.success_count += 1
+                key_info.last_error = ""
                 if self.db:
                     self.db.update_key_usage(key_info.key, is_success=True, is_rate_limit=False)
                 return validated_decision
 
             except Exception as e:
                 err_str = str(e)
+                last_err_summary = err_str[:120]
                 if (
                     "429" in err_str
                     or "rate limit" in err_str.lower()
@@ -258,11 +300,15 @@ class GeminiAnalyst:
                         )
                     continue
                 else:
+                    key_info.error_count += 1
+                    key_info.last_error = err_str[:100]
                     logger.warning(f"Gemini error with key {key_info.masked}: {e}. Rotating to next key...")
+                    if self.db:
+                        self.db.update_key_usage(key_info.key, is_success=False, is_rate_limit=False)
                     continue
 
-        logger.warning("All Gemini API keys in pool exhausted or rate-limited. Falling back to algorithmic confluence analysis.")
-        return self._mock_analysis(tech_signal, news_headlines)
+        logger.error(f"All Gemini API keys failed or rate-limited ({last_err_summary}). Enforcing Fail-Safe HOLD.")
+        return self._fail_safe_hold(tech_signal, f"Semua key Gemini gagal merespons ({last_err_summary}). Order dibatalkan demi keamanan.")
 
     def _validate_and_filter(
         self,

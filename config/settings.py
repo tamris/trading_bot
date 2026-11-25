@@ -49,7 +49,7 @@ class Settings(BaseSettings):
     # Risk Management Parameters
     RISK_PERCENT: float = Field(default=1.0, ge=0.1, le=5.0, description="Max risk percentage per trade")
     MAX_DAILY_DRAWDOWN_PERCENT: float = Field(default=3.0, ge=1.0, le=10.0, description="Max daily drawdown before pausing")
-    MAX_OPEN_POSITIONS_PER_SYMBOL: int = Field(default=2, ge=1, le=5, description="Max open positions per symbol")
+    MAX_OPEN_POSITIONS_PER_SYMBOL: int = Field(default=1, ge=1, le=5, description="Max open positions per symbol (strict 1 per pair prevents double-SL)")
     MAX_OPEN_POSITIONS_CRYPTO_ACTIVE_SESSION: int = Field(default=1, ge=1, le=5, description="Max open positions for crypto during active forex market sessions")
     MAX_OPEN_POSITIONS_CRYPTO_WEEKEND: int = Field(default=2, ge=1, le=5, description="Max open positions for crypto during weekends (when forex/gold are closed)")
     MAX_TOTAL_OPEN_POSITIONS: int = Field(default=3, ge=1, le=10, description="Max total open positions across all symbols")

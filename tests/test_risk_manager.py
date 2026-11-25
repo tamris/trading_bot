@@ -416,3 +416,32 @@ def test_friday_cutoff_and_saturday_auto_close(risk_env, monkeypatch):
 
     remaining_syms = {p["symbol"] for p in connector.get_open_positions()}
     assert remaining_syms == {"BTCUSD", "ETHUSD"}
+
+
+def test_daily_drawdown_synced_to_broker_after_db_reset():
+    """Even if SQLite DB is wiped/empty on Railway restart, daily drawdown reads broker deals today."""
+    from datetime import datetime, timezone, timedelta
+
+    wib = timezone(timedelta(hours=7))
+    now_iso_utc = datetime.now(wib).astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    class _BrokerWithTodayLoss:
+        def get_account_info(self):
+            return {"balance": 100.0, "equity": 100.0, "profit": 0.0}
+
+        def get_recent_closed_positions(self, days_back: int = 2):
+            return [
+                {"ticket": 1001, "symbol": "XAUUSD", "profit": -6.0, "close_time": now_iso_utc}
+            ]
+
+    class _EmptyDB:
+        def get_today_pnl(self, date_prefix=None):
+            return 0.0
+
+    rm = RiskManager(_BrokerWithTodayLoss(), db=_EmptyDB())
+    rm.max_daily_drawdown_percent = 3.0
+    ok, dd_pct, msg = rm.check_daily_drawdown()
+    # Loss is -$6 on $106 start-of-day balance (~5.66% >= 3.0%) -> MUST HALT!
+    assert ok is False
+    assert dd_pct >= 5.0
+    assert "DAILY DRAWDOWN BREACHED" in msg

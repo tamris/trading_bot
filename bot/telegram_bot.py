@@ -1107,11 +1107,17 @@ class TelegramBotManager:
 
         for s in status_list:
             key_id = s.get("id", s["index"])
+            err_cnt = s.get("errors", 0)
+            last_err = s.get("last_error", "")
             text += (
                 f"*[ID: #{key_id}]* Key: `{s['masked']}`\n"
                 f"   • *Status:* {s['status']}\n"
-                f"   • *Request:* `{s['requests']}` (Sukses: `{s['success']}` | Limit: `{s['rate_limits']}`)\n\n"
+                f"   • *Request:* `{s['requests']}` (Sukses: `{s['success']}` | Limit: `{s['rate_limits']}` | Err: `{err_cnt}`)\n"
             )
+            if last_err:
+                safe_err = last_err.replace("`", "'").replace("*", "").replace("_", " ")
+                text += f"   • *Error Terakhir:* `{safe_err}`\n"
+            text += "\n"
 
         text += (
             "💡 *Manajemen Key (SQLite):*\n"

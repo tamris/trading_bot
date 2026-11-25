@@ -159,11 +159,16 @@ class TechnicalEngine:
         close = float(last_candle['close'])
         high = float(last_candle['high'])
         low = float(last_candle['low'])
+        prev_high = float(prev_candle['high'])
+        prev_low = float(prev_candle['low'])
         ema50 = float(last_candle['ema50'])
         ema200 = float(last_candle['ema200'])
         rsi = float(last_candle['rsi'])
         atr = float(last_candle['atr'])
         adx = float(last_candle['adx']) if 'adx' in last_candle else 25.0
+
+        sym_upper = symbol.upper()
+        price_dec = 3 if "JPY" in sym_upper else (2 if ("XAU" in sym_upper or "GOLD" in sym_upper or "BTC" in sym_upper or "ETH" in sym_upper) else 5)
 
         h1_ema200 = None
         h1_macro_bullish = True
@@ -177,9 +182,15 @@ class TechnicalEngine:
             h1_macro_bullish = h1_close >= h1_ema200
             h1_macro_bearish = h1_close <= h1_ema200
 
-        # Pullback proximity check (within 0.8 * ATR from EMA50 or candle wick touched EMA50)
-        near_ema50_buy = (low <= ema50 * 1.002) or (abs(close - ema50) <= 0.8 * atr)
-        near_ema50_sell = (high >= ema50 * 0.998) or (abs(close - ema50) <= 0.8 * atr)
+        # Pure ATR-based Pullback & Rejection rules (universal across Forex, Gold, and Crypto):
+        # 1. Wick of current or previous candle touched/entered EMA50 value zone (within 0.5 * ATR)
+        # 2. Close rejected back to the trend side of EMA50 (prevents entering against reversals!)
+        # 3. Distance from EMA50 <= 1.0 * ATR (prevents chasing overextended moves at the top/bottom!)
+        touched_ema50_buy = (low <= ema50 + 0.5 * atr) or (prev_low <= ema50 + 0.5 * atr)
+        near_ema50_buy = touched_ema50_buy and (close > ema50) and ((close - ema50) <= 1.0 * atr)
+
+        touched_ema50_sell = (high >= ema50 - 0.5 * atr) or (prev_high >= ema50 - 0.5 * atr)
+        near_ema50_sell = touched_ema50_sell and (close < ema50) and ((ema50 - close) <= 1.0 * atr)
 
         # ADX trend strength filter (reject flat, choppy, sideways ranges)
         min_adx = getattr(settings, "ADX_MIN_THRESHOLD", 20.0)
@@ -190,7 +201,8 @@ class TechnicalEngine:
         is_bearish_candle = (close <= open_price) or ((high - close) > (close - low))
 
         # ----------------- Check BUY Setup -----------------
-        is_buy_trend = (close > ema200) and h1_macro_bullish
+        # Require full EMA alignment (EMA50 > EMA200) + price > EMA200 + H1 macro bullish
+        is_buy_trend = (close > ema200) and (ema50 > ema200) and h1_macro_bullish
         is_buy_rsi = settings.RSI_BUY_MIN <= rsi <= settings.RSI_BUY_MAX
 
         if is_buy_trend and near_ema50_buy and is_buy_rsi:
@@ -229,8 +241,8 @@ class TechnicalEngine:
                     reason="Candle confirmation missing (waiting for bullish bounce from EMA50)"
                 )
 
-            sl = round(close - (self.sl_multiplier * atr), 5 if "EUR" in symbol else 2)
-            tp = round(close + (self.tp_multiplier * atr), 5 if "EUR" in symbol else 2)
+            sl = round(close - (self.sl_multiplier * atr), price_dec)
+            tp = round(close + (self.tp_multiplier * atr), price_dec)
             return TechnicalSignal(
                 symbol=symbol,
                 is_valid=True,
@@ -245,11 +257,12 @@ class TechnicalEngine:
                 ema200=ema200,
                 adx=adx,
                 h1_ema200=h1_ema200,
-                reason=f"BUY setup: Close ({close:.2f}) > EMA200 ({ema200:.2f}), EMA50 pullback active, RSI ({rsi:.1f}) in range [40, 65], ADX ({adx:.1f}) trending"
+                reason=f"BUY setup: Close ({close:.{price_dec}f}) > EMA50 ({ema50:.{price_dec}f}) > EMA200 ({ema200:.{price_dec}f}), ATR pullback & bounce valid, RSI ({rsi:.1f}), ADX ({adx:.1f})"
             )
 
         # ----------------- Check SELL Setup -----------------
-        is_sell_trend = (close < ema200) and h1_macro_bearish
+        # Require full EMA alignment (EMA50 < EMA200) + price < EMA200 + H1 macro bearish
+        is_sell_trend = (close < ema200) and (ema50 < ema200) and h1_macro_bearish
         is_sell_rsi = settings.RSI_SELL_MIN <= rsi <= settings.RSI_SELL_MAX
 
         if is_sell_trend and near_ema50_sell and is_sell_rsi:
@@ -288,8 +301,8 @@ class TechnicalEngine:
                     reason="Candle confirmation missing (waiting for bearish rejection from EMA50)"
                 )
 
-            sl = round(close + (self.sl_multiplier * atr), 5 if "EUR" in symbol else 2)
-            tp = round(close - (self.tp_multiplier * atr), 5 if "EUR" in symbol else 2)
+            sl = round(close + (self.sl_multiplier * atr), price_dec)
+            tp = round(close - (self.tp_multiplier * atr), price_dec)
             return TechnicalSignal(
                 symbol=symbol,
                 is_valid=True,
@@ -304,14 +317,18 @@ class TechnicalEngine:
                 ema200=ema200,
                 adx=adx,
                 h1_ema200=h1_ema200,
-                reason=f"SELL setup: Close ({close:.2f}) < EMA200 ({ema200:.2f}), EMA50 pullback active, RSI ({rsi:.1f}) in range [35, 60], ADX ({adx:.1f}) trending"
+                reason=f"SELL setup: Close ({close:.{price_dec}f}) < EMA50 ({ema50:.{price_dec}f}) < EMA200 ({ema200:.{price_dec}f}), ATR pullback & rejection valid, RSI ({rsi:.1f}), ADX ({adx:.1f})"
             )
 
         # ----------------- No Setup (HOLD) -----------------
         bias = "BULLISH" if close > ema200 else ("BEARISH" if close < ema200 else "NEUTRAL")
         reasons = []
+        if bias == "BULLISH" and ema50 <= ema200:
+            reasons.append("EMA50 <= EMA200 (struktur uptrend belum terbentuk)")
+        elif bias == "BEARISH" and ema50 >= ema200:
+            reasons.append("EMA50 >= EMA200 (struktur downtrend belum terbentuk)")
         if not (near_ema50_buy or near_ema50_sell):
-            reasons.append("Price not near EMA50 pullback")
+            reasons.append("Price not in valid ATR pullback/rejection zone at EMA50")
         if not (is_buy_rsi or is_sell_rsi):
             reasons.append(f"RSI ({rsi:.1f}) out of trigger boundaries")
         if not (h1_macro_bullish if bias == "BULLISH" else h1_macro_bearish):

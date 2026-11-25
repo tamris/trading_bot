@@ -1,4 +1,5 @@
 import logging
+import time
 from datetime import datetime, timezone, timedelta, date
 from typing import Dict, Any, List, Optional, Tuple, Set
 import math
@@ -42,11 +43,63 @@ class RiskManager:
         self._current_date: Optional[date] = None
         self._daily_starting_equity: float = 0.0
         self._dd_pnl_offset: float = 0.0
+        self._broker_today_pnl_cache: Optional[Tuple[float, str, float]] = None
 
         # Track tickets that have already taken Partial TP
         self._partial_closed_tickets: Set[int] = set()
         # Track tickets that have already had Break-Even applied
         self._bep_moved_tickets: Set[int] = set()
+
+    def _get_today_closed_pnl_wib(self) -> Optional[float]:
+        """
+        Compute today's realized closed PnL (WIB date) prioritizing broker deal history
+        when available so daily drawdown stays accurate even after Railway restarts.
+        Returns None only when neither broker history nor DB is attached.
+        """
+        wib = timezone(timedelta(hours=7))
+        today_str = datetime.now(wib).strftime("%Y-%m-%d")
+
+        broker_pnl: Optional[float] = None
+        if hasattr(self.mt5, "get_recent_closed_positions"):
+            now_ts = time.time()
+            if (
+                self._broker_today_pnl_cache is not None
+                and self._broker_today_pnl_cache[1] == today_str
+                and (now_ts - self._broker_today_pnl_cache[0]) < 30.0
+            ):
+                broker_pnl = self._broker_today_pnl_cache[2]
+            else:
+                try:
+                    recent = self.mt5.get_recent_closed_positions(days_back=2) or []
+                    total_broker = 0.0
+                    found_today = False
+                    for rc in recent:
+                        raw_t = str(rc.get("close_time") or "").strip()
+                        if not raw_t:
+                            continue
+                        try:
+                            dt = datetime.fromisoformat(raw_t.replace("Z", "+00:00"))
+                            if dt.tzinfo is None:
+                                dt = dt.replace(tzinfo=timezone.utc)
+                            dt_wib = dt.astimezone(wib)
+                            if dt_wib.strftime("%Y-%m-%d") == today_str:
+                                total_broker += float(rc.get("profit", 0.0))
+                                found_today = True
+                        except Exception:
+                            continue
+                    if found_today:
+                        broker_pnl = round(total_broker, 2)
+                        self._broker_today_pnl_cache = (now_ts, today_str, broker_pnl)
+                except Exception as e:
+                    logger.warning(f"[Risk] Could not fetch broker closed deals for drawdown check: {e}")
+
+        db_pnl: Optional[float] = None
+        if self.db and hasattr(self.db, "get_today_pnl"):
+            db_pnl = float(self.db.get_today_pnl())
+
+        if broker_pnl is not None:
+            return broker_pnl
+        return db_pnl
 
     def initialize_daily_equity(self, current_equity: Optional[float] = None, force_reset: bool = False):
         """Record the initial realized balance at the start of a trading day (00:00 WIB)."""
@@ -55,15 +108,17 @@ class RiskManager:
         is_new_day = self._current_date != today_wib
         if is_new_day:
             self._dd_pnl_offset = 0.0
+            self._broker_today_pnl_cache = None
 
         if is_new_day or self._daily_starting_equity <= 0 or force_reset:
             if current_equity is None:
                 acc = self.mt5.get_account_info()
                 # Prefer realized balance so container restarts during floating profits never inflate baseline!
                 base_bal = float(acc.get("balance", acc.get("equity", 10000.0)))
-                if self.db and hasattr(self.db, "get_today_pnl") and not force_reset:
-                    today_closed = float(self.db.get_today_pnl())
-                    base_bal = max(base_bal - today_closed, 10.0)
+                if not force_reset:
+                    today_closed = self._get_today_closed_pnl_wib()
+                    if today_closed is not None:
+                        base_bal = max(base_bal - today_closed, 10.0)
                 current_equity = base_bal
 
             self._daily_starting_equity = float(current_equity)
@@ -72,19 +127,21 @@ class RiskManager:
 
     def reset_drawdown(self, new_equity: Optional[float] = None) -> float:
         """Manually reset daily drawdown baseline to current balance/equity (clears any halt)."""
+        self._broker_today_pnl_cache = None
         acc = self.mt5.get_account_info()
         if new_equity is None:
             new_equity = float(acc.get("balance", acc.get("equity", 100.0)))
-        if self.db and hasattr(self.db, "get_today_pnl"):
-            self._dd_pnl_offset = float(self.db.get_today_pnl())
+        today_closed = self._get_today_closed_pnl_wib()
+        if today_closed is not None:
+            self._dd_pnl_offset = float(today_closed)
         self.initialize_daily_equity(current_equity=new_equity, force_reset=True)
         return self._daily_starting_equity
 
     def check_daily_drawdown(self) -> Tuple[bool, float, str]:
         """
         Check if today's actual trading drawdown exceeds the maximum allowed percentage.
-        When SQLite DB is attached, calculates drawdown strictly from today's realized + floating
-        trading PnL, making it 100% immune to withdrawals, deposits, and restart floating-equity spikes.
+        Prioritizes broker deal history + SQLite realized PnL + live floating PnL,
+        making it immune to withdrawals, deposits, and Railway container restarts.
         Returns (is_allowed, current_drawdown_pct, message).
         """
         self.initialize_daily_equity()
@@ -95,8 +152,9 @@ class RiskManager:
         if self._daily_starting_equity <= 0:
             return True, 0.0, "Starting equity not set"
 
-        if self.db and hasattr(self.db, "get_today_pnl"):
-            today_closed_pnl = float(self.db.get_today_pnl()) - self._dd_pnl_offset
+        raw_today_closed = self._get_today_closed_pnl_wib()
+        if raw_today_closed is not None:
+            today_closed_pnl = raw_today_closed - self._dd_pnl_offset
             floating_pnl = float(acc.get("profit", current_equity - current_balance))
             today_trading_pnl = today_closed_pnl + floating_pnl
 
@@ -238,6 +296,7 @@ class RiskManager:
 
     def record_symbol_exit(self, symbol: str, exit_time: Optional[datetime] = None):
         """Record the exit timestamp of a trade to enforce the re-entry cooldown period."""
+        self._broker_today_pnl_cache = None
         wib = timezone(timedelta(hours=7))
         now_wib = exit_time or datetime.now(wib)
         sym_clean = self._clean_symbol(symbol)
