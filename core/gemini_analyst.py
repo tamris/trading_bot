@@ -28,6 +28,9 @@ class GeminiTradingDecision(BaseModel):
         "BULLISH_EUR", "BEARISH_EUR",
         "BULLISH_JPY", "BEARISH_JPY",
         "BULLISH_GOLD", "BEARISH_GOLD",
+        "BULLISH_CRYPTO", "BEARISH_CRYPTO",
+        "BULLISH_BTC", "BEARISH_BTC",
+        "BULLISH_ETH", "BEARISH_ETH",
         "RISK_ON", "RISK_OFF", "NEUTRAL"
     ] = Field(
         description="Dominant macro/currency sentiment extracted from news"
